@@ -199,6 +199,7 @@ impl S3Client {
         bucket: &str,
         prefix: &str,
         local_path: &str,
+        metadata: &[(String, String)],
     ) -> Result<String> {
         let file_name = std::path::Path::new(local_path)
             .file_name()
@@ -210,30 +211,31 @@ impl S3Client {
             .await
             .with_context(|| format!("failed to read local file {local_path}"))?;
 
-        self.client
-            .put_object()
-            .bucket(bucket)
-            .key(&key)
-            .body(body)
-            .send()
+        let mut put = self.client.put_object().bucket(bucket).key(&key).body(body);
+        if !metadata.is_empty() {
+            let map: std::collections::HashMap<String, String> = metadata.iter().cloned().collect();
+            put = put.set_metadata(Some(map));
+        }
+        put.send()
             .await
             .with_context(|| format!("failed to upload to s3://{bucket}/{key}"))?;
 
         Ok(key)
     }
 
-    /// Upload several local files into `prefix`, keying each by its file name.
-    /// Returns a per-file report so partial failures don't abort the batch.
+    /// Upload several local files into `prefix`, keying each by its file name
+    /// and attaching its per-file metadata. Returns a per-file report so
+    /// partial failures don't abort the batch.
     pub async fn upload_files(
         &self,
         bucket: &str,
         prefix: &str,
-        local_paths: &[std::path::PathBuf],
+        files: &[(std::path::PathBuf, Vec<(String, String)>)],
     ) -> UploadReport {
         let mut report = UploadReport::default();
-        for path in local_paths {
+        for (path, metadata) in files {
             let path_str = path.to_string_lossy();
-            match self.upload_file(bucket, prefix, &path_str).await {
+            match self.upload_file(bucket, prefix, &path_str, metadata).await {
                 Ok(key) => report.uploaded.push(format!("{bucket}/{key}")),
                 Err(e) => report
                     .failures
@@ -307,6 +309,12 @@ impl S3Client {
         let etag = response.e_tag().map(|s| s.to_string());
         let content_type = response.content_type().map(|s| s.to_string());
 
+        let mut metadata: Vec<(String, String)> = response
+            .metadata()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        metadata.sort_by(|a, b| a.0.cmp(&b.0));
+
         Ok(ObjectDetail {
             bucket: bucket.to_string(),
             key: key.to_string(),
@@ -323,6 +331,7 @@ impl S3Client {
             etag,
             content_type,
             content_length: response.content_length().map(|l| l as u64),
+            metadata,
         })
     }
 }

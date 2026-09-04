@@ -66,6 +66,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     match state.input_mode {
         InputMode::FilePicker => render_file_picker(frame, state, &theme),
+        InputMode::Metadata => render_metadata_editor(frame, state, &theme),
         InputMode::None => {}
         _ => render_input_popup(frame, state, &theme),
     }
@@ -427,12 +428,31 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
                         value_style(theme),
                     ),
                 ]),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Press i or Esc to go back",
-                    Style::default().fg(theme.text_dim),
-                )),
+                Line::from(vec![
+                    Span::styled("Metadata:      ", label_style(theme)),
+                    Span::styled(
+                        if d.metadata.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            format!("{} entry(ies)", d.metadata.len())
+                        },
+                        value_style(theme),
+                    ),
+                ]),
             ]
+            .into_iter()
+            .chain(d.metadata.iter().map(|(k, v)| {
+                Line::from(Span::styled(
+                    truncate(&format!("    {k}: {v}"), 80),
+                    value_style(theme),
+                ))
+            }))
+            .chain(std::iter::once(Line::from("")))
+            .chain(std::iter::once(Line::from(Span::styled(
+                "Press i or Esc to go back",
+                Style::default().fg(theme.text_dim),
+            ))))
+            .collect()
         }
     };
 
@@ -693,7 +713,7 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
 
     // Key hints (second-to-last line is the path, still in the list block).
     let hints = format!(
-        " {} | ↑↓:move · Enter/→:open dir · Space:mark/unmark · a:all · c:clear · u:upload · Esc:back ",
+        " {} | ↑↓:move · Enter/→:open dir · Space:mark/unmark · a:all · c:clear · u:metadata · Esc:back ",
         state.file_picker.dir.display()
     );
     frame.render_widget(
@@ -703,6 +723,141 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         )))
         .block(Block::default().borders(Borders::NONE))
         .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
+
+/// Full-screen overlay where the user attaches `key=value` metadata to each
+/// marked file before the batch upload starts.
+fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
+    let area = frame.area();
+
+    if state.metadata_editor.is_empty() {
+        let popup = centered_rect(60, 5, area);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new("No files marked for upload.\nPress Esc to go back.")
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(panel_border(theme, true))
+                        .title(Line::from(Span::styled(
+                            " Upload metadata ",
+                            panel_title(theme),
+                        ))),
+                ),
+            popup,
+        );
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let editor = &state.metadata_editor;
+    let selected_name = editor
+        .selected_file()
+        .map(|(p, _)| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default();
+
+    {
+        let items: Vec<ListItem> = editor
+            .files
+            .iter()
+            .enumerate()
+            .map(|(pos, (path, entries))| {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let meta = if entries.is_empty() {
+                    "-".to_string()
+                } else {
+                    entries
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                };
+                let is_selected = pos == editor.selected;
+                let base = if is_selected {
+                    Style::default().fg(theme.accent)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                let style = if is_selected {
+                    base.add_modifier(Modifier::BOLD)
+                } else {
+                    base
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(if is_selected { "▸ " } else { "  " }, style),
+                    Span::styled(name, style),
+                    Span::styled(format!("  {meta}"), Style::default().fg(theme.text_dim)),
+                ]))
+            })
+            .collect();
+
+        let block = Block::default()
+            .title(Line::from(Span::styled(
+                centered_title(format!(
+                    " Metadata for {} file(s) — editing: {selected_name} ",
+                    editor.len()
+                )),
+                panel_title(theme),
+            )))
+            .title_bottom(Line::from(Span::styled(
+                " entries are added with 'key=value' below; '-key' removes one",
+                Style::default().fg(theme.text_dim),
+            )))
+            .borders(Borders::ALL)
+            .border_style(panel_border(theme, true))
+            .padding(Padding::horizontal(1));
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(selected_row(theme));
+
+        let mut list_state = ratatui::widgets::ListState::default();
+        if !editor.files.is_empty() {
+            list_state.select(Some(editor.selected.min(editor.files.len() - 1)));
+        }
+        frame.render_stateful_widget(list, chunks[0], &mut list_state);
+    }
+
+    let input_text = if state.input_buffer.is_empty() {
+        " key=value and Enter to add · -key and Enter to remove".to_string()
+    } else {
+        format!(" >{}", state.input_buffer)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            input_text,
+            Style::default().fg(theme.info),
+        )))
+        .block(Block::default().borders(Borders::NONE)),
+        chunks[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " ↑↓:file · Enter:add/remove entry · u:upload now · Esc:back ",
+            Style::default().fg(theme.text_dim),
+        )))
+        .block(Block::default().borders(Borders::NONE)),
         chunks[2],
     );
 }
@@ -723,6 +878,7 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         InputMode::Directory => (" Enter destination directory ", theme.warning),
         InputMode::Filter => (" Filter objects (type to search) ", theme.accent),
         InputMode::FilePicker => (" Select files to upload ", theme.info),
+        InputMode::Metadata => (" Upload metadata ", theme.info),
         InputMode::None => (" Input ", theme.text_dim),
     };
 
@@ -743,7 +899,8 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         InputMode::Confirm => "Deleting this object cannot be undone. Type y to confirm.",
         InputMode::Directory => "Enter the destination directory for the download.",
         InputMode::Filter => "Type to filter objects. Enter applies it, Esc clears it.",
-        InputMode::FilePicker => "Select one or more files. u starts the upload.",
+        InputMode::FilePicker => "Select one or more files. u opens the metadata editor.",
+        InputMode::Metadata => "Attach key=value metadata to each file, then press u.",
         InputMode::None => "",
     };
     frame.render_widget(
@@ -828,7 +985,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{AppState, BucketInfo, ObjectInfo};
+    use crate::app::{AppState, BucketInfo, ObjectDetail, ObjectInfo};
     use crate::ui::theme;
     use chrono::TimeZone;
     use ratatui::{Terminal, backend::TestBackend};
@@ -943,5 +1100,50 @@ mod tests {
         let theme = theme::from_id("dracula");
         let buffer = draw(&mut state, 120, 30);
         assert_eq!(fg_at(&buffer, "Confirm (y/n)"), theme.error);
+    }
+
+    #[test]
+    fn renders_metadata_editor_shows_files_and_entries() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::Metadata;
+        state.metadata_editor = crate::app::MetadataEditor::from_paths(vec![
+            std::path::PathBuf::from("/tmp/a.txt"),
+            std::path::PathBuf::from("/tmp/b.log"),
+        ]);
+        state
+            .metadata_editor
+            .apply_command("env=prod")
+            .expect("valid entry");
+        let buffer = draw(&mut state, 60, 14);
+        assert!(locate(&buffer, "a.txt").is_some(), "file shown");
+        assert!(locate(&buffer, "b.log").is_some(), "file shown");
+        assert!(
+            locate(&buffer, "env=prod").is_some(),
+            "entry shown for selected file"
+        );
+    }
+
+    #[test]
+    fn object_detail_shows_uploaded_metadata() {
+        let mut state = sample_state();
+        state.current_panel = Panel::Preview;
+        state.selected_object_detail = Some(ObjectDetail {
+            bucket: "demo".to_string(),
+            key: "demo/myfile.txt".to_string(),
+            size: Some(1024),
+            last_modified: None,
+            storage_class: StorageClass::Standard,
+            etag: None,
+            content_type: Some("text/plain".to_string()),
+            content_length: Some(1024),
+            metadata: vec![
+                ("env".to_string(), "prod".to_string()),
+                ("team".to_string(), "infra".to_string()),
+            ],
+        });
+        let buffer = draw(&mut state, 120, 30);
+        assert!(locate(&buffer, "Metadata:").is_some(), "metadata header");
+        assert!(locate(&buffer, "env: prod").is_some(), "metadata entry");
+        assert!(locate(&buffer, "team: infra").is_some(), "metadata entry");
     }
 }

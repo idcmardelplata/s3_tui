@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::filepicker::FilePicker;
 use crate::ui::theme::{Theme, resolve};
@@ -83,6 +84,7 @@ pub enum InputMode {
     None,
     Confirm,
     FilePicker,
+    Metadata,
     Directory,
     Filter,
 }
@@ -97,6 +99,8 @@ pub struct ObjectDetail {
     pub etag: Option<String>,
     pub content_type: Option<String>,
     pub content_length: Option<u64>,
+    /// User metadata attached at upload time (`x-amz-meta-*`), key-sorted.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// Summary produced by a batch download of multiple objects.
@@ -111,6 +115,91 @@ pub struct DownloadReport {
 pub struct UploadReport {
     pub uploaded: Vec<String>,
     pub failures: Vec<(String, String)>,
+}
+
+/// Per-file upload metadata editor: one list of `key=value` pairs per marked
+/// local file, gathered right before the batch upload runs.
+#[derive(Debug, Clone, Default)]
+pub struct MetadataEditor {
+    pub files: Vec<(PathBuf, Vec<(String, String)>)>,
+    pub selected: usize,
+}
+
+impl MetadataEditor {
+    pub fn from_paths(paths: Vec<PathBuf>) -> Self {
+        Self {
+            files: paths.into_iter().map(|p| (p, Vec::new())).collect(),
+            selected: 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn selected_file(&self) -> Option<&(PathBuf, Vec<(String, String)>)> {
+        self.files.get(self.selected)
+    }
+
+    pub fn select_next(&mut self) {
+        if self.selected + 1 < self.files.len() {
+            self.selected += 1;
+        }
+    }
+
+    pub fn select_prev(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    /// Parse a command line for the selected file: `key=value` sets/overwrites
+    /// a metadata entry, `-key` removes it. Returns the human message to show.
+    pub fn apply_command(&mut self, line: &str) -> Result<(), String> {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix('-') {
+            let key = rest.trim();
+            if key.is_empty() {
+                return Err("expected -key to remove a metadata entry".to_string());
+            }
+            if let Some(file) = self.files.get_mut(self.selected) {
+                let before = file.1.len();
+                file.1.retain(|(k, _)| k != key);
+                if file.1.len() == before {
+                    return Err(format!("no metadata key '{key}' to remove"));
+                }
+            }
+            return Ok(());
+        }
+        let Some(eq) = line.find('=') else {
+            return Err("expected key=value (or -key to remove)".to_string());
+        };
+        let key = line[..eq].trim().to_string();
+        let value = line[eq + 1..].trim().to_string();
+        if key.is_empty() {
+            return Err("metadata key cannot be empty".to_string());
+        }
+        if value.is_empty() {
+            return Err("metadata value cannot be empty".to_string());
+        }
+        if let Some(file) = self.files.get_mut(self.selected) {
+            if let Some((_, v)) = file.1.iter_mut().find(|(k, _)| *k == key) {
+                *v = value;
+            } else {
+                file.1.push((key, value));
+            }
+        }
+        Ok(())
+    }
+
+    /// The list of (path, metadata) pairs to be handed to the uploader.
+    pub fn to_upload(&self) -> Vec<(PathBuf, Vec<(String, String)>)> {
+        self.files.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +259,8 @@ pub struct AppState {
     pub theme: Theme,
     /// Local file browser used by the multi-file upload flow.
     pub file_picker: FilePicker,
+    /// Per-file metadata gathered right before the upload is started.
+    pub metadata_editor: MetadataEditor,
 }
 
 impl AppState {
@@ -194,6 +285,7 @@ impl AppState {
             selected_keys: HashSet::new(),
             theme: resolve(),
             file_picker: FilePicker::new(),
+            metadata_editor: MetadataEditor::default(),
         }
     }
 
@@ -344,6 +436,15 @@ impl AppState {
 
     pub fn cancel_input(&mut self) {
         self.input_mode = InputMode::None;
+        self.input_buffer.clear();
+        self.pending_action = PendingAction::None;
+    }
+
+    /// Move the marked files from the picker into the metadata editor and
+    /// enter `InputMode::Metadata`.
+    pub fn start_metadata(&mut self, paths: Vec<PathBuf>) {
+        self.metadata_editor = MetadataEditor::from_paths(paths);
+        self.input_mode = InputMode::Metadata;
         self.input_buffer.clear();
         self.pending_action = PendingAction::None;
     }

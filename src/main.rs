@@ -452,20 +452,15 @@ async fn handle_input_key(
                 state.status_message = "Selection cleared".to_string();
             }
             KeyCode::Char('u') | KeyCode::Char('U') => {
-                let paths = state.file_picker.selected_paths();
-                if paths.is_empty() {
+                if state.file_picker.selection_count() == 0 {
                     state.status_message =
                         "No files marked - press Space on a file first".to_string();
-                } else if let Some(bucket) = state.current_bucket.clone() {
-                    let prefix = state.current_prefix.clone();
-                    let n = paths.len();
-                    state.cancel_input();
-                    state.loading_state =
-                        LoadingState::Loading(format!("Uploading {n} file(s)..."));
-                    spawn_upload_many(s3_client, task_tx, &bucket, &prefix, paths);
                 } else {
+                    let paths = state.file_picker.selected_paths();
+                    state.start_metadata(paths);
                     state.status_message =
-                        "Select a bucket first, then press u to upload".to_string();
+                        "Add metadata: 'key=value' Enter · '-key' removes · u to upload"
+                            .to_string();
                 }
             }
             KeyCode::Esc => {
@@ -482,6 +477,56 @@ async fn handle_input_key(
                 state.file_picker.filter.push(c);
                 state.file_picker.selected_index = 0;
             }
+            _ => {}
+        },
+        InputMode::Metadata => match code {
+            KeyCode::Up | KeyCode::Char('k') => state.metadata_editor.select_prev(),
+            KeyCode::Down | KeyCode::Char('j') => state.metadata_editor.select_next(),
+            KeyCode::Backspace => {
+                state.input_buffer.pop();
+            }
+            KeyCode::Enter => {
+                let line = state.input_buffer.trim().to_string();
+                state.input_buffer.clear();
+                match state.metadata_editor.apply_command(&line) {
+                    Ok(()) => {
+                        let entries = state
+                            .metadata_editor
+                            .selected_file()
+                            .map(|(_, m)| m.len())
+                            .unwrap_or(0);
+                        state.status_message =
+                            format!("Metadata updated ({entries} key(s) set for this file)");
+                    }
+                    Err(e) => state.status_message = e,
+                }
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                let files = state.metadata_editor.to_upload();
+                if files.is_empty() {
+                    state.status_message = "No files marked for upload".to_string();
+                } else if let Some(bucket) = state.current_bucket.clone() {
+                    let prefix = state.current_prefix.clone();
+                    let n = files.len();
+                    state.cancel_input();
+                    state.loading_state =
+                        LoadingState::Loading(format!("Uploading {n} file(s)..."));
+                    spawn_upload_many(s3_client, task_tx, &bucket, &prefix, files);
+                } else {
+                    state.status_message = "Select a bucket first".to_string();
+                }
+            }
+            KeyCode::Esc => {
+                if !state.input_buffer.is_empty() {
+                    state.input_buffer.clear();
+                } else {
+                    state.start_input(InputMode::FilePicker, "");
+                    state.pending_action = PendingAction::None;
+                    state.status_message =
+                        "Back to file picker - press u for metadata again".to_string();
+                }
+            }
+            KeyCode::Char(c) => state.input_buffer.push(c),
             _ => {}
         },
         InputMode::Directory => match code {
@@ -586,7 +631,7 @@ fn spawn_upload_many(
     task_tx: &UnboundedSender<TaskMessage>,
     bucket: &str,
     prefix: &str,
-    paths: Vec<PathBuf>,
+    files: Vec<(PathBuf, Vec<(String, String)>)>,
 ) {
     let tx = task_tx.clone();
     let client = s3_client.client.clone();
@@ -594,7 +639,7 @@ fn spawn_upload_many(
     let prefix = prefix.to_string();
     tokio::spawn(async move {
         let report = S3Client::from_client(client, "")
-            .upload_files(&bucket, &prefix, &paths)
+            .upload_files(&bucket, &prefix, &files)
             .await;
         let _ = tx.send(TaskMessage::FilesUploaded { result: Ok(report) });
     });
@@ -732,11 +777,28 @@ mod picker_flow_smoke {
             "space marks two files"
         );
 
+        // 'u' now opens the metadata editor; add metadata to the first file,
+        // then upload with 'u'.
+        handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
+        assert_eq!(
+            state.input_mode,
+            InputMode::Metadata,
+            "u enters the metadata editor"
+        );
+        assert_eq!(state.metadata_editor.len(), 2, "both marked files listed");
+        state.input_buffer = "env=prod".to_string();
+        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        assert_eq!(
+            state.metadata_editor.selected_file().unwrap().1,
+            vec![("env".to_string(), "prod".to_string())],
+            "metadata captured per file"
+        );
+
         handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
         assert_eq!(
             state.input_mode,
             InputMode::None,
-            "picker closed after upload"
+            "editor closed after upload"
         );
 
         let mut report = None;
@@ -751,6 +813,39 @@ mod picker_flow_smoke {
         let result = report.expect("upload task reported back");
         let report = result.unwrap_or_else(|e| panic!("upload failed: {e}"));
         assert_eq!(report.uploaded.len(), 2, "both marked files uploaded");
-        eprintln!("FLOW OK: {report:?}");
+
+        let head = s3_client
+            .client
+            .head_object()
+            .bucket(bucket)
+            .key("one.txt")
+            .send()
+            .await
+            .unwrap();
+        let meta = head
+            .metadata()
+            .and_then(|m| m.get("env"))
+            .map(|v| v.as_str())
+            .unwrap_or_default();
+        assert_eq!(meta, "prod", "metadata landed on the uploaded object");
+
+        let detail = s3_client
+            .get_object_info(bucket, "one.txt")
+            .await
+            .expect("object info readable");
+        let info_env = detail
+            .metadata
+            .iter()
+            .find(|(k, _)| k == "env")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            info_env, "prod",
+            "ObjectDetail surfaces the upload metadata"
+        );
+        eprintln!(
+            "FLOW OK: {report:?} meta.env={meta} info.metadata={:?}",
+            detail.metadata
+        );
     }
 }
