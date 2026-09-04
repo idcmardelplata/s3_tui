@@ -16,6 +16,7 @@ use crate::app::{AppState, InputMode, LoadingState, Panel, StorageClass};
 use theme::{Theme, panel_border};
 
 /// The set of columns rendered in the objects table and their relative widths.
+const OBJ_SEL_W: u16 = 4;
 const OBJ_ICON_W: u16 = 3;
 const OBJ_SIZE_W: u16 = 12;
 const OBJ_STORAGE_W: u16 = 22;
@@ -192,13 +193,21 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     let visible_total = visible.len();
 
     // ---- Build the table header -------------------------------------------
+    let sel_hdr = Span::styled("Sel", theme.panel_title());
     let icon_hdr = Span::styled("", theme.panel_title());
     let name_hdr = Span::styled("Name", theme.panel_title());
     let size_hdr = Span::styled("Size", theme.panel_title());
     let storage_hdr = Span::styled("Storage", theme.panel_title());
     let date_hdr = Span::styled("Modified", theme.panel_title());
-    let header = Row::new(vec![icon_hdr, name_hdr, size_hdr, storage_hdr, date_hdr])
-        .style(Style::default().bg(Color::DarkGray));
+    let header = Row::new(vec![
+        sel_hdr,
+        icon_hdr,
+        name_hdr,
+        size_hdr,
+        storage_hdr,
+        date_hdr,
+    ])
+    .style(Style::default().bg(Color::DarkGray));
 
     // ---- Build rows --------------------------------------------------------
     let rows: Vec<Row> = visible
@@ -207,6 +216,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         .map(|(pos, &real_idx)| {
             let obj = &state.objects[real_idx];
             let is_selected = active && pos == state.selected_index;
+            let is_marked = state.selected_keys.contains(&obj.key);
             let base = if obj.is_folder {
                 Style::default().fg(theme.folder)
             } else {
@@ -243,7 +253,23 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
             let sc_style = Style::default().fg(storage_class_color(theme, &obj.storage_class));
             let sc = truncate(&sc, OBJ_STORAGE_W as usize - 1);
 
+            let checkbox = if obj.is_folder {
+                String::new()
+            } else if is_marked {
+                "\u{2713}".to_string()
+            } else {
+                " ".to_string()
+            };
+            let checkbox_style = if is_marked {
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+
             Row::new(vec![
+                Cell::from(Span::styled(format!("[{checkbox}]"), checkbox_style)),
                 Cell::from(Span::styled(format!(" {icon} "), style)),
                 Cell::from(Span::styled(name.to_string(), style)),
                 Cell::from(Span::styled(size, Style::default().fg(theme.muted))),
@@ -264,7 +290,16 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     }
     let title_span = Span::styled(centered_title(&title), theme.panel_title());
 
-    let metrics = format!("{}/{} shown", visible_total, state.objects.len());
+    let metrics = if state.selected_keys.is_empty() {
+        format!("{}/{} shown", visible_total, state.objects.len())
+    } else {
+        format!(
+            "{} selected | {}/{} shown",
+            state.selected_keys.len(),
+            visible_total,
+            state.objects.len()
+        )
+    };
     let bottom_span = Span::styled(metrics, Style::default().fg(theme.muted));
 
     let block = Block::default()
@@ -275,6 +310,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         .padding(Padding::horizontal(1));
 
     let widths = [
+        Constraint::Length(OBJ_SEL_W),
         Constraint::Length(OBJ_ICON_W),
         Constraint::Min(10),
         Constraint::Length(OBJ_SIZE_W),
@@ -485,6 +521,9 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
         ("q", "quit"),
         ("u", "upload"),
         ("g", "down"),
+        ("space", "sel"),
+        ("a", "all"),
+        ("c", "clear"),
         ("i", "info"),
         ("/", "filter"),
         ("d", "del"),
@@ -509,7 +548,7 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
 
 fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let area = frame.area();
-    let popup = centered_rect(70, 14, area);
+    let popup = centered_rect(70, 10, area);
 
     frame.render_widget(Clear, popup);
 
@@ -583,24 +622,32 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     frame.render_widget(popup_block, popup);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
+/// Returns a rect centered in `r` with a fixed number of rows and a width that
+/// is `percent_x` of the full width. Using a fixed height (instead of a
+/// percentage of the terminal) guarantees the input field always has room to
+/// render its content.
+fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let height = height.min(r.height.saturating_sub(2));
+    let vertical = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Length((r.height.saturating_sub(height)) / 2),
+            Constraint::Length(height),
+            Constraint::Min(0),
         ])
         .split(r);
 
-    Layout::default()
+    let width = (r.width * percent_x) / 100;
+    let horizontal = Layout::default()
         .direction(ratatui::layout::Direction::Horizontal)
         .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Length(r.width.saturating_sub(width) / 2),
+            Constraint::Length(width),
+            Constraint::Min(0),
         ])
-        .split(popup_layout[1])[1]
+        .split(vertical[1]);
+
+    horizontal[1]
 }
 
 /// Truncate `s` to at most `max` characters (with an ellipsis when cut).

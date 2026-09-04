@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use chrono::DateTime;
 
-use crate::app::{BucketInfo, ObjectDetail, ObjectInfo, StorageClass};
+use crate::app::{BucketInfo, DownloadReport, ObjectDetail, ObjectInfo, StorageClass};
 
 fn map_storage_class(sc: &aws_sdk_s3::types::ObjectStorageClass) -> StorageClass {
     use aws_sdk_s3::types::ObjectStorageClass as Aws;
@@ -210,6 +210,34 @@ impl S3Client {
             .with_context(|| format!("failed to write local file {dest_path}"))?;
 
         Ok(())
+    }
+
+    /// Download several objects into `dest_dir`, preserving each object's file
+    /// name. Returns a report with per-object results so partial failures don't
+    /// abort the whole batch.
+    pub async fn download_objects(
+        &self,
+        bucket: &str,
+        keys: &[String],
+        dest_dir: &str,
+    ) -> DownloadReport {
+        let base = dest_dir.trim_end_matches('/');
+        let mut report = DownloadReport::default();
+
+        for key in keys {
+            let file_name = std::path::Path::new(key)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("download");
+            let dest_path = format!("{base}/{file_name}");
+
+            match self.download_file(bucket, key, &dest_path).await {
+                Ok(()) => report.downloaded.push(key.clone()),
+                Err(e) => report.failures.push((key.clone(), e.to_string())),
+            }
+        }
+
+        report
     }
 
     pub async fn get_object_info(&self, bucket: &str, key: &str) -> Result<ObjectDetail> {

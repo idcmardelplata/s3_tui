@@ -164,6 +164,30 @@ fn handle_task_message(
                 state.status_message = format!("Failed to load object info: {e}");
             }
         },
+        TaskMessage::ObjectsDownloaded { result } => {
+            match result {
+                Ok(report) => {
+                    let ok = report.downloaded.len();
+                    let fail = report.failures.len();
+                    state.status_message = if fail == 0 {
+                        format!("Downloaded {ok} object(s)")
+                    } else {
+                        format!(
+                            "Downloaded {ok}, failed {fail}: {}",
+                            report
+                                .failures
+                                .iter()
+                                .map(|(k, _)| k.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                }
+                Err(e) => state.status_message = format!("Batch download failed: {e}"),
+            }
+            state.selected_keys.clear();
+            state.loading_state = LoadingState::Idle;
+        }
     }
 }
 
@@ -184,7 +208,7 @@ async fn handle_key(
         }
         KeyCode::Char('?') => {
             state.status_message =
-                "Help: q:quit | u:upload | g:download | d:delete | Enter:open | ←:back | ↑↓:nav"
+                "Help: q:quit | u:upload | g:download | d:delete | Space:select | a:all | c:clear | Enter:open | ←:back | ↑↓:nav"
                     .to_string();
         }
         KeyCode::Up | KeyCode::Char('k') => state.select_prev(),
@@ -220,15 +244,48 @@ async fn handle_key(
         KeyCode::Char('g') | KeyCode::Char('G') => {
             if state.current_panel == Panel::Objects {
                 let bucket = state.current_bucket.clone();
-                let selected = state
+                let selected_keys = state.selected_keys_in_visible();
+                let single = state
                     .selected_object()
                     .map(|o| (o.key.clone(), o.is_folder));
-                if let (Some(bucket), Some((key, is_folder))) = (bucket, selected)
+
+                if let Some(bucket) = bucket.as_deref()
+                    && !selected_keys.is_empty()
+                {
+                    state.start_input(InputMode::Directory, "./");
+                    state.pending_action = PendingAction::DownloadMany {
+                        bucket: bucket.to_string(),
+                        keys: selected_keys,
+                    };
+                } else if let (Some(bucket), Some((key, is_folder))) = (bucket.as_deref(), single)
                     && !is_folder
                 {
                     state.start_input(InputMode::Directory, "./");
-                    state.pending_action = PendingAction::Download { bucket, key };
+                    state.pending_action = PendingAction::Download {
+                        bucket: bucket.to_string(),
+                        key,
+                    };
                 }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if state.current_panel == Panel::Objects && state.input_mode == InputMode::None {
+                state.toggle_select_current();
+            }
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            if state.current_panel == Panel::Objects {
+                state.select_all_visible();
+                state.status_message = format!(
+                    "Selected {} object(s)",
+                    state.selected_keys_in_visible().len()
+                );
+            }
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            if !state.selected_keys.is_empty() {
+                state.clear_selection();
+                state.status_message = "Selection cleared".to_string();
             }
         }
         KeyCode::Char('d') => {
@@ -342,18 +399,29 @@ async fn handle_input_key(
                 let action = std::mem::replace(&mut state.pending_action, PendingAction::None);
                 let dest_dir = state.input_buffer.trim().to_string();
                 state.cancel_input();
-                if let PendingAction::Download { bucket, key } = action {
-                    let base = dest_dir.trim_end_matches('/').to_string();
-                    let dest_path = format!(
-                        "{}/{}",
-                        base,
-                        Path::new(&key)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("download")
-                    );
-                    state.loading_state = LoadingState::Loading(format!("Downloading {key}..."));
-                    spawn_download(s3_client, task_tx, &bucket, &key, &dest_path);
+                match action {
+                    PendingAction::Download { bucket, key } => {
+                        let base = dest_dir.trim_end_matches('/').to_string();
+                        let dest_path = format!(
+                            "{}/{}",
+                            base,
+                            Path::new(&key)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("download")
+                        );
+                        state.loading_state =
+                            LoadingState::Loading(format!("Downloading {key}..."));
+                        spawn_download(s3_client, task_tx, &bucket, &key, &dest_path);
+                    }
+                    PendingAction::DownloadMany { bucket, keys } => {
+                        let n = keys.len();
+                        state.loading_state = LoadingState::Loading(format!(
+                            "Downloading {n} object(s) to {dest_dir}"
+                        ));
+                        spawn_download_many(s3_client, task_tx, &bucket, &keys, &dest_dir);
+                    }
+                    _ => {}
                 }
             }
             KeyCode::Esc => {
@@ -464,6 +532,26 @@ fn spawn_download(
             Err(e) => Err(e.to_string()),
         };
         let _ = tx.send(TaskMessage::ObjectDownloaded { result });
+    });
+}
+
+fn spawn_download_many(
+    s3_client: &S3Client,
+    task_tx: &UnboundedSender<TaskMessage>,
+    bucket: &str,
+    keys: &[String],
+    dest_dir: &str,
+) {
+    let tx = task_tx.clone();
+    let client = s3_client.client.clone();
+    let bucket = bucket.to_string();
+    let keys: Vec<String> = keys.to_vec();
+    let dest_dir = dest_dir.to_string();
+    tokio::spawn(async move {
+        let report = S3Client::from_client(client, "")
+            .download_objects(&bucket, &keys, &dest_dir)
+            .await;
+        let _ = tx.send(TaskMessage::ObjectsDownloaded { result: Ok(report) });
     });
 }
 

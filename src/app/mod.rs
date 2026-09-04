@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
@@ -95,11 +96,19 @@ pub struct ObjectDetail {
     pub content_length: Option<u64>,
 }
 
+/// Summary produced by a batch download of multiple objects.
+#[derive(Debug, Clone, Default)]
+pub struct DownloadReport {
+    pub downloaded: Vec<String>,
+    pub failures: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PendingAction {
     None,
     DeleteObject { bucket: String, key: String },
     Download { bucket: String, key: String },
+    DownloadMany { bucket: String, keys: Vec<String> },
 }
 
 #[derive(Debug)]
@@ -120,6 +129,9 @@ pub enum TaskMessage {
         result: Result<String, String>,
     },
     ObjectDetailLoaded(Result<ObjectDetail, String>),
+    ObjectsDownloaded {
+        result: Result<DownloadReport, String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +154,8 @@ pub struct AppState {
     pub region: String,
     pub filter: String,
     pub selected_object_detail: Option<ObjectDetail>,
+    /// Keys of objects currently multi-selected for batch operations.
+    pub selected_keys: HashSet<String>,
 }
 
 impl AppState {
@@ -163,6 +177,7 @@ impl AppState {
             region,
             filter: String::new(),
             selected_object_detail: None,
+            selected_keys: HashSet::new(),
         }
     }
 
@@ -238,6 +253,7 @@ impl AppState {
             self.current_prefix.clear();
             self.objects.clear();
             self.selected_index = 0;
+            self.selected_keys.clear();
             self.current_panel = Panel::Objects;
             self.status_message = format!("Viewing s3://{name}/");
             return Some(name);
@@ -254,6 +270,7 @@ impl AppState {
                 self.current_prefix = key.clone();
                 self.objects.clear();
                 self.selected_index = 0;
+                self.selected_keys.clear();
                 self.status_message = format!(
                     "s3://{}/{}/",
                     self.current_bucket.as_deref().unwrap_or(""),
@@ -274,6 +291,7 @@ impl AppState {
                     self.current_bucket = None;
                     self.objects.clear();
                     self.selected_index = 0;
+                    self.selected_keys.clear();
                     self.status_message = String::from("Press ? for help");
                     None
                 } else {
@@ -286,6 +304,7 @@ impl AppState {
                     }
                     self.objects.clear();
                     self.selected_index = 0;
+                    self.selected_keys.clear();
                     self.status_message = format!(
                         "s3://{}/{}/",
                         self.current_bucket.as_deref().unwrap_or(""),
@@ -311,5 +330,49 @@ impl AppState {
         self.input_mode = InputMode::None;
         self.input_buffer.clear();
         self.pending_action = PendingAction::None;
+    }
+
+    /// Toggle multi-selection for the currently selected object (files only).
+    pub fn toggle_select_current(&mut self) {
+        if self.current_panel == Panel::Objects
+            && let Some(obj) = self.selected_object()
+            && !obj.is_folder
+        {
+            let key = obj.key.clone();
+            if !self.selected_keys.remove(&key) {
+                self.selected_keys.insert(key);
+            }
+        }
+    }
+
+    /// Select all visible (non-folder) objects.
+    pub fn select_all_visible(&mut self) {
+        if self.current_panel == Panel::Objects {
+            for idx in self.visible_indices() {
+                if !self.objects[idx].is_folder {
+                    self.selected_keys.insert(self.objects[idx].key.clone());
+                }
+            }
+        }
+    }
+
+    /// Returns the keys currently marked for batch download.
+    pub fn selected_keys_in_visible(&self) -> Vec<String> {
+        self.visible_indices()
+            .iter()
+            .filter_map(|&i| {
+                let obj = &self.objects[i];
+                if !obj.is_folder && self.selected_keys.contains(&obj.key) {
+                    Some(obj.key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Drop the whole multi-selection.
+    pub fn clear_selection(&mut self) {
+        self.selected_keys.clear();
     }
 }
