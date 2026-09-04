@@ -334,7 +334,7 @@ impl AppState {
             input_mode: InputMode::None,
             input_buffer: String::new(),
             pending_action: PendingAction::None,
-            status_message: String::from("Press ? for help"),
+            status_message: String::from("Presioná ? para la ayuda"),
             should_quit: false,
             region,
             filter: String::new(),
@@ -420,7 +420,7 @@ impl AppState {
             self.selected_index = 0;
             self.selected_keys.clear();
             self.current_panel = Panel::Objects;
-            self.status_message = format!("Viewing s3://{name}/");
+            self.status_message = format!("Viendo s3://{name}/");
             return Some(name);
         }
         None
@@ -457,7 +457,7 @@ impl AppState {
                     self.objects.clear();
                     self.selected_index = 0;
                     self.selected_keys.clear();
-                    self.status_message = String::from("Press ? for help");
+                    self.status_message = String::from("Presioná ? para la ayuda");
                     None
                 } else {
                     // Go up one level in prefix

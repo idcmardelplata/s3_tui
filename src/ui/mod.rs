@@ -134,7 +134,7 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         )))
         .title_bottom(Line::from(Span::styled(
             if active {
-                " Enter: open  /  h: back "
+                " Enter: abrir  /  h: atrás "
             } else {
                 ""
             },
@@ -203,10 +203,10 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     // ---- Build the table header -------------------------------------------
     let sel_hdr = Span::styled("Sel", panel_title(theme));
     let icon_hdr = Span::styled("", panel_title(theme));
-    let name_hdr = Span::styled("Name", panel_title(theme));
-    let size_hdr = Span::styled("Size", panel_title(theme));
-    let storage_hdr = Span::styled("Storage", panel_title(theme));
-    let date_hdr = Span::styled("Modified", panel_title(theme));
+    let name_hdr = Span::styled("Nombre", panel_title(theme));
+    let size_hdr = Span::styled("Tamaño", panel_title(theme));
+    let storage_hdr = Span::styled("Almacenamiento", panel_title(theme));
+    let date_hdr = Span::styled("Modificado", panel_title(theme));
     let header = Row::new(vec![
         sel_hdr,
         icon_hdr,
@@ -291,18 +291,18 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     let mut title = if let Some(bucket) = &bucket {
         format!("s3://{bucket}/{prefix}")
     } else {
-        "Objects".to_string()
+        "Objetos".to_string()
     };
     if !state.filter.is_empty() {
-        title = format!("{title}  [filter: '{}']", state.filter);
+        title = format!("{title}  [filtro: '{}']", state.filter);
     }
     let title_span = Span::styled(centered_title(&title), panel_title(theme));
 
     let metrics = if state.selected_keys.is_empty() {
-        format!("{}/{} shown", visible_total, state.objects.len())
+        format!("{}/{} visibles", visible_total, state.objects.len())
     } else {
         format!(
-            "{} selected | {}/{} shown",
+            "{} seleccionados | {}/{} visibles",
             state.selected_keys.len(),
             visible_total,
             state.objects.len()
@@ -362,7 +362,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
     let detail = &state.selected_object_detail;
     let block = Block::default()
         .title(Line::from(Span::styled(
-            centered_title("Object info"),
+            centered_title("Información del objeto"),
             panel_title(theme),
         )))
         .borders(Borders::ALL)
@@ -371,7 +371,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
 
     let lines: Vec<Line> = match detail {
         None => vec![Line::from(Span::styled(
-            "No object selected / loading...",
+            "Sin objeto seleccionado / cargando...",
             Style::default().fg(theme.text_dim),
         ))],
         Some(d) => {
@@ -383,25 +383,25 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
                     Span::styled(&d.bucket, value_style(theme)),
                 ]),
                 Line::from(vec![
-                    Span::styled("Key:           ", label_style(theme)),
+                    Span::styled("Clave:         ", label_style(theme)),
                     Span::styled(&d.key, value_style(theme)),
                 ]),
                 Line::from(vec![
-                    Span::styled("Size:          ", label_style(theme)),
+                    Span::styled("Tamaño:        ", label_style(theme)),
                     Span::styled(
                         size_label.unwrap_or_else(|| "-".to_string()),
                         value_style(theme),
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("ContentLength: ", label_style(theme)),
+                    Span::styled("Longitud:      ", label_style(theme)),
                     Span::styled(
                         content_length_label.unwrap_or_else(|| "-".to_string()),
                         value_style(theme),
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("LastModified:  ", label_style(theme)),
+                    Span::styled("Última modif.: ", label_style(theme)),
                     Span::styled(
                         d.last_modified
                             .map(|m| m.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -410,7 +410,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("StorageClass:  ", label_style(theme)),
+                    Span::styled("Almacenamiento:", label_style(theme)),
                     Span::styled(
                         d.storage_class.to_string(),
                         value_style(theme).patch(storage_class_color(theme, &d.storage_class)),
@@ -424,19 +424,19 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("ContentType:   ", label_style(theme)),
+                    Span::styled("Tipo contenido:", label_style(theme)),
                     Span::styled(
                         d.content_type.clone().unwrap_or_else(|| "-".to_string()),
                         value_style(theme),
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("Metadata:      ", label_style(theme)),
+                    Span::styled("Metadatos:     ", label_style(theme)),
                     Span::styled(
                         if d.metadata.is_empty() {
-                            "(none)".to_string()
+                            "(ninguna)".to_string()
                         } else {
-                            format!("{} entry(ies)", d.metadata.len())
+                            format!("{} entrada(s)", d.metadata.len())
                         },
                         value_style(theme),
                     ),
@@ -451,7 +451,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
             }))
             .chain(std::iter::once(Line::from("")))
             .chain(std::iter::once(Line::from(Span::styled(
-                "Press i or Esc to go back",
+                "Presioná i o Esc para volver",
                 Style::default().fg(theme.text_dim),
             ))))
             .collect()
@@ -486,7 +486,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect
             }),
         )),
         Line::from(Span::styled(
-            " Objects ",
+            " Objetos ",
             Style::default().fg(if objects_active {
                 theme.accent
             } else {
@@ -542,17 +542,17 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
 
     // Build help as a single row of key hints so it stays within one line.
     let help_keys: &[(&str, &str)] = &[
-        ("?", "help"),
-        ("q", "quit"),
-        ("u", "upload"),
-        ("g", "down"),
-        ("space", "sel"),
-        ("a", "all"),
-        ("c", "clear"),
+        ("?", "ayuda"),
+        ("q", "salir"),
+        ("u", "subir"),
+        ("g", "bajar"),
+        ("espacio", "sel"),
+        ("a", "todo"),
+        ("c", "limpiar"),
         ("i", "info"),
-        ("/", "filter"),
-        ("d", "del"),
-        ("Esc", "back"),
+        ("/", "filtro"),
+        ("d", "borrar"),
+        ("Esc", "atrás"),
     ];
     let mut line: Vec<Span> = Vec::new();
     for (k, v) in help_keys {
@@ -576,7 +576,7 @@ fn render_legend(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
     let _ = state;
     let legend = Paragraph::new(Line::from(vec![
         Span::styled(" s3-tui ", panel_title(theme)),
-        Span::styled("author: ", Style::default().fg(theme.text_dim)),
+        Span::styled("autor: ", Style::default().fg(theme.text_dim)),
         Span::styled(
             "@idcmardelplata",
             Style::default()
@@ -635,13 +635,7 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
                     base
                 };
 
-                let check = if entry.is_dir {
-                    " "
-                } else if is_marked {
-                    "\u{2713}"
-                } else {
-                    " "
-                };
+                let check = if is_marked { "\u{2713}" } else { " " };
                 let check_style = if is_marked {
                     Style::default()
                         .fg(theme.success)
@@ -668,9 +662,9 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
             })
             .collect();
 
-        let mut title = format!("Select files · {}", picker.dir.display());
+        let mut title = format!("Seleccionar archivos · {}", picker.dir.display());
         if !picker.filter.is_empty() {
-            title = format!("{title}  [filter: '{}']", picker.filter);
+            title = format!("{title}  [filtro: '{}']", picker.filter);
         }
         let block = Block::default()
             .title(Line::from(Span::styled(
@@ -679,7 +673,7 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
             )))
             .title_bottom(Line::from(Span::styled(
                 format!(
-                    "{} selected | {}/{} shown",
+                    "{} seleccionados | {}/{} visibles",
                     picker.selection_count(),
                     visible.len(),
                     picker.entries.len().saturating_sub(1)
@@ -717,7 +711,7 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let filter_text = if picker_is_loading_error(state) {
         format!(" {}", state.file_picker.hint)
     } else if state.file_picker.filter.is_empty() {
-        " Type to fuzzy-filter files (subsequence match)".to_string()
+        " Escribí para filtrar archivos (coincidencia por subsecuencia)".to_string()
     } else {
         format!(" /{}", state.file_picker.filter)
     };
@@ -732,7 +726,7 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
 
     // Key hints (second-to-last line is the path, still in the list block).
     let hints = format!(
-        " {} | ↑↓:move · Enter/→:open dir · Space:mark/unmark · a:all · c:clear · u:metadata · Esc:back ",
+        " {} | ↑↓:mover · Enter/→:abrir dir · Espacio:marcar/desmarcar · a:todo · c:limpiar · u:metadatos · Esc:atrás ",
         state.file_picker.dir.display()
     );
     frame.render_widget(
@@ -755,14 +749,14 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         let popup = centered_rect(60, 5, area);
         frame.render_widget(Clear, popup);
         frame.render_widget(
-            Paragraph::new("No files marked for upload.\nPress Esc to go back.")
+            Paragraph::new("Sin archivos marcados para subir.\nPresioná Esc para volver.")
                 .alignment(ratatui::layout::Alignment::Center)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(panel_border(theme, true))
                         .title(Line::from(Span::styled(
-                            " Upload metadata ",
+                            " Metadatos de subida ",
                             panel_title(theme),
                         ))),
                 ),
@@ -798,7 +792,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         let is_cursor_value = editor.field == MetadataField::Value;
 
         let header = Line::from(Span::styled(
-            "  #  KEY                     VALUE",
+            "  #  CLAVE                VALOR",
             Style::default()
                 .fg(theme.text_dim)
                 .add_modifier(Modifier::BOLD),
@@ -808,7 +802,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         rows.push(ListItem::new(header));
         if entries.is_empty() {
             rows.push(ListItem::new(Line::from(Span::styled(
-                "  No metadata rows yet — press A to add one",
+                "  Todavía no hay filas de metadatos — presioná A para agregar una",
                 Style::default().fg(theme.text_dim),
             ))));
         }
@@ -827,7 +821,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
 
             let key_span = if is_cursor && is_cursor_key {
                 let display = if key_text.is_empty() {
-                    "(empty)".to_string()
+                    "(vacío)".to_string()
                 } else {
                     format!("{key_text:<22}", key_text = truncate(key_text, 22))
                 };
@@ -848,7 +842,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
 
             let value_span = if is_cursor && is_cursor_value {
                 let display = if value_text.is_empty() {
-                    "(empty)".to_string()
+                    "(vacío)".to_string()
                 } else {
                     value_text.to_string()
                 };
@@ -898,7 +892,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
 
         let block = Block::default()
             .title(Line::from(Span::styled(
-                centered_title(format!(" Upload metadata — {selected_name} ",)),
+                centered_title(format!(" Metadatos de subida — {selected_name} ",)),
                 panel_title(theme),
             )))
             .borders(Borders::ALL)
@@ -910,19 +904,19 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
     }
 
     let field_name = match state.metadata_editor.field {
-        MetadataField::Key => "KEY",
-        MetadataField::Value => "VALUE",
+        MetadataField::Key => "CLAVE",
+        MetadataField::Value => "VALOR",
     };
     let buffer_text = if state.input_buffer.is_empty() {
         format!(
-            " file {}/{} · {} entry(ies) · editing {field_name}",
+            " elemento {}/{} · {} entrada(s) · editando {field_name}",
             editor.selected + 1,
             editor.len(),
             editor.entries_len()
         )
     } else {
         format!(
-            " file {}/{} · {} entry(ies) · editing {field_name} · `{}`",
+            " elemento {}/{} · {} entrada(s) · editando {field_name} · `{}`",
             editor.selected + 1,
             editor.len(),
             editor.entries_len(),
@@ -940,7 +934,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ↑↓:row · Tab:key↔value · Enter:ok · A:add row · D:delete row · N/P:file · U:upload now · Esc:back ",
+            " ↑↓:fila · Tab:clave↔valor · Enter:aceptar · A:agregar fila · D:borrar fila · N/P:elemento · U:subir ahora · Esc:atrás ",
             Style::default().fg(theme.text_dim),
         )))
         .block(Block::default().borders(Borders::NONE)),
@@ -960,12 +954,12 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     frame.render_widget(Clear, popup);
 
     let (title, border_color) = match state.input_mode {
-        InputMode::Confirm => (" Confirm (y/n) ", theme.error),
-        InputMode::Directory => (" Enter destination directory ", theme.warning),
-        InputMode::Filter => (" Filter objects (type to search) ", theme.accent),
-        InputMode::FilePicker => (" Select files to upload ", theme.info),
-        InputMode::Metadata => (" Upload metadata ", theme.info),
-        InputMode::None => (" Input ", theme.text_dim),
+        InputMode::Confirm => (" Confirmar (s/n) ", theme.error),
+        InputMode::Directory => (" Directorio de descarga ", theme.warning),
+        InputMode::Filter => (" Filtrar objetos (escribí para buscar) ", theme.accent),
+        InputMode::FilePicker => (" Seleccionar archivos para subir ", theme.info),
+        InputMode::Metadata => (" Metadatos de subida ", theme.info),
+        InputMode::None => (" Entrada ", theme.text_dim),
     };
 
     // Popup inner area to give breathing room around the input.
@@ -982,11 +976,11 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
 
     // A short descriptive line above the field.
     let helper = match state.input_mode {
-        InputMode::Confirm => "Deleting cannot be undone. Type y to confirm.",
-        InputMode::Directory => "Enter the destination directory for the download.",
-        InputMode::Filter => "Type to filter objects. Enter applies it, Esc clears it.",
-        InputMode::FilePicker => "Select one or more files. u opens the metadata editor.",
-        InputMode::Metadata => "Edit each file's metadata table, then press uppercase U to upload.",
+        InputMode::Confirm => "Esta acción no se puede deshacer. Escribí s para confirmar.",
+        InputMode::Directory => "Ingresá el directorio de destino para la descarga.",
+        InputMode::Filter => "Escribí para filtrar objetos. Enter aplica, Esc limpia.",
+        InputMode::FilePicker => "Seleccioná archivos o carpetas. u abre el editor de metadatos.",
+        InputMode::Metadata => "Editá la tabla de metadatos y presioná U (mayúscula) para subir.",
         InputMode::None => "",
     };
     frame.render_widget(
@@ -1176,7 +1170,7 @@ mod tests {
         state.input_mode = InputMode::Directory;
         state.input_buffer = "/tmp/downloads".to_string();
         let buffer = draw(&mut state, 120, 30);
-        assert!(locate(&buffer, "Enter destination directory").is_some());
+        assert!(locate(&buffer, "Directorio de descarga").is_some());
     }
 
     #[test]
@@ -1213,7 +1207,7 @@ mod tests {
         state.input_mode = InputMode::Confirm;
         let theme = theme::from_id("dracula");
         let buffer = draw(&mut state, 120, 30);
-        assert_eq!(fg_at(&buffer, "Confirm (y/n)"), theme.error);
+        assert_eq!(fg_at(&buffer, "Confirmar (s/n)"), theme.error);
     }
 
     #[test]
@@ -1256,7 +1250,7 @@ mod tests {
             ],
         });
         let buffer = draw(&mut state, 120, 30);
-        assert!(locate(&buffer, "Metadata:").is_some(), "metadata header");
+        assert!(locate(&buffer, "Metadatos:").is_some(), "metadata header");
         assert!(locate(&buffer, "env: prod").is_some(), "metadata entry");
         assert!(locate(&buffer, "team: infra").is_some(), "metadata entry");
     }

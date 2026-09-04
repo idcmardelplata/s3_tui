@@ -9,9 +9,10 @@ pub struct FileEntry {
     pub size: Option<u64>,
 }
 
-/// Popup file browser used to pick one or more local files to upload.
+/// Popup file browser used to pick one or more local files (or whole
+/// directories, uploaded as their full tree) to upload.
 ///
-/// Browsing keeps an explicit `selection` of full paths so files chosen in
+/// Browsing keeps an explicit `selection` of full paths so items chosen in
 /// different directories can be uploaded together. A fuzzy `filter` matches
 /// entry names by subsequence and ranks the results by relevance.
 #[derive(Debug, Clone)]
@@ -23,7 +24,7 @@ pub struct FilePicker {
     /// Index into the filtered, "visible" list.
     pub selected_index: usize,
     pub scroll_offset: usize,
-    /// Full paths of the files chosen for upload (in selection order).
+    /// Full paths of the files/folders chosen for upload (in selection order).
     pub selection: Vec<PathBuf>,
     /// Fuzzy query. Empty shows every entry.
     pub filter: String,
@@ -96,7 +97,7 @@ impl FilePicker {
                 self.hint.clear();
             }
             Err(e) => {
-                self.hint = format!("Could not read directory: {e}");
+                self.hint = format!("No se pudo leer el directorio: {e}");
             }
         }
 
@@ -160,13 +161,14 @@ impl FilePicker {
             .map(|&i| &self.entries[i])
     }
 
-    /// Add/remove the highlighted file (directories are ignored) from the
-    /// upload selection. Returns `true` if the entry is currently selected.
+    /// Add/remove the highlighted file or directory from the upload selection
+    /// (a directory uploads its whole tree). The `..` parent marker is ignored.
+    /// Returns `true` if the entry is currently selected.
     pub fn toggle_selected(&mut self) -> bool {
         let Some(entry) = self.selected_entry().cloned() else {
             return false;
         };
-        if entry.is_dir {
+        if entry.name == ".." {
             return false;
         }
         if let Some(pos) = self.selection.iter().position(|p| p == &entry.path) {
@@ -178,11 +180,12 @@ impl FilePicker {
         }
     }
 
-    /// Add every visible non-directory entry to the selection.
+    /// Add every visible entry (files and subdirectories, but not the `..`
+    /// parent marker) to the selection.
     pub fn select_all_visible(&mut self) {
         for idx in self.visible_indices() {
             let entry = &self.entries[idx];
-            if !entry.is_dir && !self.selection.contains(&entry.path) {
+            if entry.name != ".." && !self.selection.contains(&entry.path) {
                 self.selection.push(entry.path.clone());
             }
         }
@@ -192,7 +195,7 @@ impl FilePicker {
         self.selection.clear();
     }
 
-    /// Full paths of the files chosen for upload.
+    /// Full paths of the files/folders chosen for upload.
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.selection.clone()
     }
@@ -361,6 +364,35 @@ mod tests {
         picker.toggle_selected();
         picker.select_all_visible();
         assert_eq!(picker.selection_count(), 2);
+    }
+
+    #[test]
+    fn toggling_directories_marks_whole_tree_but_ignores_parent() {
+        let tmp = temp_dir("toggledir");
+        fs::create_dir_all(tmp.join("docs/sub")).unwrap();
+        fs::write(tmp.join("docs/a.txt"), "x").unwrap();
+        fs::write(tmp.join("docs/sub/b.log"), "x").unwrap();
+        fs::write(tmp.join("top.txt"), "x").unwrap();
+
+        let mut picker = FilePicker::new_at(tmp.clone());
+
+        // ".." (idx 0) can never be part of the selection.
+        picker.selected_index = 0;
+        assert!(!picker.toggle_selected(), "parent marker is ignored");
+
+        // A directory toggles like a file (its tree is expanded at upload).
+        picker.selected_index = 1; // "docs"
+        assert!(picker.toggle_selected(), "directory added");
+        assert_eq!(picker.selection_count(), 1);
+        assert!(!picker.toggle_selected(), "directory removed");
+        assert_eq!(picker.selection_count(), 0);
+
+        // "a" selects files and directories, but not the parent marker.
+        picker.select_all_visible();
+        assert_eq!(picker.selection_count(), 2);
+        assert!(picker.selection.iter().any(|p| p == &tmp.join("docs")));
+        assert!(picker.selection.iter().any(|p| p == &tmp.join("top.txt")));
+        assert!(!picker.selection.iter().any(|p| p == &tmp));
     }
 
     #[test]

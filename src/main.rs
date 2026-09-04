@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     ratatui::restore();
 
     if let Err(err) = result {
-        eprintln!("Application error: {err:#}");
+        eprintln!("Error de la aplicación: {err:#}");
     }
 
     Ok(())
@@ -63,7 +63,7 @@ async fn run_app(
     let bucket_tx = task_tx.clone();
 
     // Load buckets on startup
-    state.loading_state = LoadingState::Loading("Loading buckets...".to_string());
+    state.loading_state = LoadingState::Loading("Cargando buckets...".to_string());
     terminal.draw(|frame| ui::render(frame, &mut state))?;
 
     let client = s3_client.client.clone();
@@ -114,11 +114,11 @@ fn handle_task_message(
         TaskMessage::BucketsLoaded(result) => match result {
             Ok(buckets) => {
                 state.buckets = buckets;
-                state.status_message = format!("Loaded {} bucket(s)", state.buckets.len());
+                state.status_message = format!("Cargados {} bucket(s)", state.buckets.len());
             }
             Err(e) => {
                 state.loading_state = LoadingState::Error(e.clone());
-                state.status_message = format!("Failed to load buckets: {e}");
+                state.status_message = format!("Error al cargar buckets: {e}");
             }
         },
         TaskMessage::ObjectsLoaded {
@@ -131,12 +131,14 @@ fn handle_task_message(
                     state.objects = objects;
                     state.current_bucket = Some(bucket.clone());
                     state.current_prefix = prefix.clone();
-                    state.status_message =
-                        format!("s3://{bucket}/{prefix} - {} item(s)", state.objects.len());
+                    state.status_message = format!(
+                        "s3://{bucket}/{prefix} - {} elemento(s)",
+                        state.objects.len()
+                    );
                 }
                 Err(e) => {
                     state.loading_state = LoadingState::Error(e.clone());
-                    state.status_message = format!("Failed to load objects: {e}");
+                    state.status_message = format!("Error al cargar objetos: {e}");
                 }
             }
             state.loading_state = LoadingState::Idle;
@@ -147,10 +149,10 @@ fn handle_task_message(
                     let ok = report.uploaded.len();
                     let fail = report.failures.len();
                     state.status_message = if fail == 0 {
-                        format!("Uploaded {ok} file(s)")
+                        format!("Subidos {ok} archivo(s)")
                     } else {
                         format!(
-                            "Uploaded {ok}, failed {fail}: {}",
+                            "Subidos {ok}, fallaron {fail}: {}",
                             report
                                 .failures
                                 .iter()
@@ -160,29 +162,29 @@ fn handle_task_message(
                         )
                     };
                 }
-                Err(e) => state.status_message = format!("Upload failed: {e}"),
+                Err(e) => state.status_message = format!("Error al subir: {e}"),
             }
             state.loading_state = LoadingState::Idle;
         }
         TaskMessage::ObjectDownloaded { result } => {
             match result {
-                Ok(path) => state.status_message = format!("Downloaded to {path}"),
-                Err(e) => state.status_message = format!("Download failed: {e}"),
+                Ok(path) => state.status_message = format!("Descargado en {path}"),
+                Err(e) => state.status_message = format!("Error al descargar: {e}"),
             }
             state.loading_state = LoadingState::Idle;
         }
         TaskMessage::ObjectDeleted { result } => {
             match result {
                 Ok(key) => {
-                    state.status_message = format!("Deleted s3://{}", key);
+                    state.status_message = format!("Eliminado s3://{}", key);
                 }
-                Err(e) => state.status_message = format!("Delete failed: {e}"),
+                Err(e) => state.status_message = format!("Error al borrar: {e}"),
             }
             // Refresh the object list after a successful (or attempted) delete
             if let Some(bucket) = state.current_bucket.as_deref() {
                 let prefix = state.current_prefix.clone();
                 spawn_list_objects(s3_client, task_tx, bucket, &prefix);
-                state.loading_state = LoadingState::Loading("Refreshing...".to_string());
+                state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
             }
@@ -190,15 +192,15 @@ fn handle_task_message(
         TaskMessage::ObjectsDeleted { result } => {
             match result {
                 Ok(keys) => {
-                    state.status_message = format!("Deleted {} object(s)", keys.len());
+                    state.status_message = format!("Eliminados {} objeto(s)", keys.len());
                 }
-                Err(e) => state.status_message = format!("Batch delete failed: {e}"),
+                Err(e) => state.status_message = format!("Error en el borrado por lotes: {e}"),
             }
             state.clear_selection();
             if let Some(bucket) = state.current_bucket.as_deref() {
                 let prefix = state.current_prefix.clone();
                 spawn_list_objects(s3_client, task_tx, bucket, &prefix);
-                state.loading_state = LoadingState::Loading("Refreshing...".to_string());
+                state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
             }
@@ -208,11 +210,11 @@ fn handle_task_message(
                 state.selected_object_detail = Some(detail.clone());
                 state.current_panel = Panel::Preview;
                 state.loading_state = LoadingState::Idle;
-                state.status_message = "Press i to close info".to_string();
+                state.status_message = "Presioná i para cerrar la info".to_string();
             }
             Err(e) => {
                 state.loading_state = LoadingState::Idle;
-                state.status_message = format!("Failed to load object info: {e}");
+                state.status_message = format!("Error al cargar la información del objeto: {e}");
             }
         },
         TaskMessage::ObjectsDownloaded { result } => {
@@ -221,10 +223,10 @@ fn handle_task_message(
                     let ok = report.downloaded.len();
                     let fail = report.failures.len();
                     state.status_message = if fail == 0 {
-                        format!("Downloaded {ok} object(s)")
+                        format!("Descargados {ok} objeto(s)")
                     } else {
                         format!(
-                            "Downloaded {ok}, failed {fail}: {}",
+                            "Descargados {ok}, fallaron {fail}: {}",
                             report
                                 .failures
                                 .iter()
@@ -234,7 +236,7 @@ fn handle_task_message(
                         )
                     };
                 }
-                Err(e) => state.status_message = format!("Batch download failed: {e}"),
+                Err(e) => state.status_message = format!("Error en la descarga por lotes: {e}"),
             }
             state.selected_keys.clear();
             state.loading_state = LoadingState::Idle;
@@ -268,14 +270,14 @@ async fn handle_key(
             Panel::Buckets => {
                 if let Some(bucket) = state.enter_bucket() {
                     spawn_list_objects(s3_client, task_tx, &bucket, "");
-                    state.loading_state = LoadingState::Loading(format!("Loading {bucket}..."));
+                    state.loading_state = LoadingState::Loading(format!("Cargando {bucket}..."));
                 }
             }
             Panel::Objects => {
                 if let Some(prefix) = state.enter_folder() {
                     let bucket = state.current_bucket.clone().unwrap_or_default();
                     spawn_list_objects(s3_client, task_tx, &bucket, &prefix);
-                    state.loading_state = LoadingState::Loading(format!("Loading {prefix}..."));
+                    state.loading_state = LoadingState::Loading(format!("Cargando {prefix}..."));
                 }
             }
             _ => {}
@@ -283,17 +285,19 @@ async fn handle_key(
         KeyCode::Left | KeyCode::Char('h') => {
             if let Some((bucket, prefix)) = state.go_back() {
                 spawn_list_objects(s3_client, task_tx, &bucket, &prefix);
-                state.loading_state = LoadingState::Loading("Loading...".to_string());
+                state.loading_state = LoadingState::Loading("Cargando...".to_string());
             }
         }
         KeyCode::Char('u') | KeyCode::Char('U') => {
             if state.current_bucket.is_none() {
-                state.status_message = "Select a bucket first (Enter) to upload files".to_string();
+                state.status_message =
+                    "Seleccioná un bucket primero (Enter) para subir archivos".to_string();
             } else {
                 state.file_picker.reset();
                 state.start_input(InputMode::FilePicker, "");
                 state.pending_action = PendingAction::None;
-                state.status_message = "Pick files to upload (Space marks, u uploads)".to_string();
+                state.status_message =
+                    "Elegí los archivos a subir (Espacio marca, u sube)".to_string();
             }
         }
         KeyCode::Char('g') | KeyCode::Char('G') => {
@@ -332,7 +336,7 @@ async fn handle_key(
             if state.current_panel == Panel::Objects {
                 state.select_all_visible();
                 state.status_message = format!(
-                    "Selected {} object(s)",
+                    "Seleccionados {} objeto(s)",
                     state.selected_keys_in_visible().len()
                 );
             }
@@ -340,7 +344,7 @@ async fn handle_key(
         KeyCode::Char('c') | KeyCode::Char('C') => {
             if !state.selected_keys.is_empty() {
                 state.clear_selection();
-                state.status_message = "Selection cleared".to_string();
+                state.status_message = "Selección limpiada".to_string();
             }
         }
         KeyCode::Char('d') => {
@@ -357,7 +361,7 @@ async fn handle_key(
                     let n = selected_keys.len();
                     state.start_input(InputMode::Confirm, "");
                     state.status_message =
-                        format!("Delete {n} selected object(s)? Press y to confirm");
+                        format!("¿Borrar {n} objeto(s) seleccionados? Presioná s para confirmar");
                     state.pending_action = PendingAction::DeleteMany {
                         bucket: bucket.to_string(),
                         keys: selected_keys,
@@ -383,7 +387,7 @@ async fn handle_key(
                     && !is_folder
                 {
                     state.loading_state =
-                        LoadingState::Loading("Loading object info...".to_string());
+                        LoadingState::Loading("Cargando información del objeto...".to_string());
                     spawn_get_object_info(s3_client, task_tx, &bucket, &key);
                 }
             }
@@ -395,7 +399,7 @@ async fn handle_key(
         KeyCode::Char('/') if state.current_panel == Panel::Objects => {
             state.start_input(InputMode::Filter, "");
             state.status_message =
-                "Filter: type to search, Enter to apply, Esc to clear".to_string();
+                "Filtro: escribí para buscar, Enter aplica, Esc limpia".to_string();
         }
         _ => {}
     }
@@ -430,7 +434,7 @@ async fn handle_input_key(
                             let _ = tx.send(TaskMessage::ObjectDeleted { result });
                         });
                         state.loading_state =
-                            LoadingState::Loading(format!("Deleting {key_for_msg}..."));
+                            LoadingState::Loading(format!("Borrando {key_for_msg}..."));
                     }
                     PendingAction::DeleteMany { bucket, keys } => {
                         let n = keys.len();
@@ -449,14 +453,14 @@ async fn handle_input_key(
                         state.cancel_input();
                         state.clear_selection();
                         state.loading_state =
-                            LoadingState::Loading(format!("Deleting {n} object(s)..."));
+                            LoadingState::Loading(format!("Borrando {n} objeto(s)..."));
                     }
                     _ => {}
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 state.cancel_input();
-                state.status_message = "Action cancelled".to_string();
+                state.status_message = "Acción cancelada".to_string();
             }
             _ => {}
         },
@@ -489,42 +493,43 @@ async fn handle_input_key(
                 state.file_picker.toggle_selected();
                 let after = state.file_picker.selection_count();
                 state.status_message = if after > before {
-                    format!("Marked ({after} selected) - press u to upload")
+                    format!("Marcado ({after} seleccionados) - presioná u para subir")
                 } else if after < before {
-                    format!("Unmarked ({after} selected)")
+                    format!("Desmarcado ({after} seleccionados)")
                 } else {
-                    format!("{after} selected (directories open with Enter)")
+                    format!("{after} seleccionados (las carpetas abren con Enter)")
                 };
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 state.file_picker.select_all_visible();
                 let n = state.file_picker.selection_count();
-                state.status_message = format!("Selected {n} file(s)");
+                state.status_message = format!("Seleccionados {n} elemento(s)");
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 state.file_picker.clear_selection();
-                state.status_message = "Selection cleared".to_string();
+                state.status_message = "Selección limpiada".to_string();
             }
             KeyCode::Char('u') | KeyCode::Char('U') => {
                 if state.file_picker.selection_count() == 0 {
                     state.status_message =
-                        "No files marked - press Space on a file first".to_string();
+                        "No marcaste nada - presioná Espacio sobre un archivo o carpeta"
+                            .to_string();
                 } else {
                     let paths = state.file_picker.selected_paths();
                     state.start_metadata(paths);
                     state.status_message =
-                        "Add metadata: 'key=value' Enter · '-key' removes · u to upload"
+                        "Agregá metadatos en la tabla (A:fila nueva · Tab:cambia campo)"
                             .to_string();
                 }
             }
             KeyCode::Esc => {
                 if state.file_picker.filter.is_empty() {
                     state.cancel_input();
-                    state.status_message = "Upload cancelled".to_string();
+                    state.status_message = "Subida cancelada".to_string();
                 } else {
                     state.file_picker.filter.clear();
                     state.file_picker.selected_index = 0;
-                    state.status_message = "Filter cleared".to_string();
+                    state.status_message = "Filtro limpiado".to_string();
                 }
             }
             KeyCode::Char(c) => {
@@ -563,14 +568,15 @@ async fn handle_input_key(
                 state.metadata_editor.add_row();
                 state.input_buffer.clear();
                 state.status_message =
-                    "Editing new row - type the key, Enter, then the value".to_string();
+                    "Fila nueva - escribí la clave, Enter, y luego el valor".to_string();
             }
             KeyCode::Char('D') | KeyCode::Delete => {
                 if state.metadata_editor.delete_row() {
                     state.input_buffer.clear();
-                    state.status_message = "Row deleted".to_string();
+                    state.status_message = "Fila eliminada".to_string();
                 } else {
-                    state.status_message = "Nothing to delete - use A to add a row".to_string();
+                    state.status_message =
+                        "No hay nada para borrar - usá A para agregar una fila".to_string();
                 }
             }
             KeyCode::Char('N') | KeyCode::BackTab => {
@@ -588,16 +594,16 @@ async fn handle_input_key(
                 state.input_buffer.clear();
                 let files = state.metadata_editor.to_upload();
                 if files.is_empty() {
-                    state.status_message = "No files marked for upload".to_string();
+                    state.status_message = "No marcaste archivos para subir".to_string();
                 } else if let Some(bucket) = state.current_bucket.clone() {
                     let prefix = state.current_prefix.clone();
                     let n = files.len();
                     state.cancel_input();
                     state.loading_state =
-                        LoadingState::Loading(format!("Uploading {n} file(s)..."));
+                        LoadingState::Loading(format!("Subiendo {n} archivo(s)..."));
                     spawn_upload_many(s3_client, task_tx, &bucket, &prefix, files);
                 } else {
-                    state.status_message = "Select a bucket first".to_string();
+                    state.status_message = "Seleccioná un bucket primero".to_string();
                 }
             }
             KeyCode::Esc => {
@@ -607,7 +613,7 @@ async fn handle_input_key(
                     state.start_input(InputMode::FilePicker, "");
                     state.pending_action = PendingAction::None;
                     state.status_message =
-                        "Back to file picker - press u for metadata again".to_string();
+                        "Volviste al selector de archivos - presioná u para metadatos".to_string();
                 }
             }
             KeyCode::Char(c) => state.input_buffer.push(c),
@@ -637,13 +643,13 @@ async fn handle_input_key(
                                 .unwrap_or("download")
                         );
                         state.loading_state =
-                            LoadingState::Loading(format!("Downloading {key}..."));
+                            LoadingState::Loading(format!("Descargando {key}..."));
                         spawn_download(s3_client, task_tx, &bucket, &key, &dest_path);
                     }
                     PendingAction::DownloadMany { bucket, keys } => {
                         let n = keys.len();
                         state.loading_state = LoadingState::Loading(format!(
-                            "Downloading {n} object(s) to {dest_dir}"
+                            "Descargando {n} objeto(s) a {dest_dir}"
                         ));
                         spawn_download_many(s3_client, task_tx, &bucket, &keys, &dest_dir);
                     }
@@ -652,7 +658,7 @@ async fn handle_input_key(
             }
             KeyCode::Esc => {
                 state.cancel_input();
-                state.status_message = "Download cancelled".to_string();
+                state.status_message = "Descarga cancelada".to_string();
             }
             _ => {}
         },
@@ -670,7 +676,7 @@ async fn handle_input_key(
             KeyCode::Enter => {
                 state.cancel_input();
                 state.status_message = format!(
-                    "Filter applied: '{}' - {} match(es)",
+                    "Filtro aplicado: '{}' - {} coincidencia(s)",
                     state.filter,
                     state.visible_count()
                 );
@@ -679,7 +685,7 @@ async fn handle_input_key(
                 state.cancel_input();
                 state.filter.clear();
                 state.selected_index = 0;
-                state.status_message = "Filter cleared".to_string();
+                state.status_message = "Filtro limpiado".to_string();
             }
             _ => {}
         },
@@ -943,6 +949,137 @@ mod picker_flow_smoke {
             "FLOW OK: {report:?} meta.env={meta} info.metadata={:?}",
             detail.metadata
         );
+    }
+
+    #[tokio::test]
+    async fn upload_directory_tree() {
+        if std::env::var("S3_REGRESSION").as_deref() != Ok("1") {
+            eprintln!("skipping (set S3_REGRESSION=1 to run)");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("s3tui-flow-tree-{}", std::process::id()));
+        let docs = base.join("docs");
+        std::fs::create_dir_all(docs.join("sub/deep")).unwrap();
+        std::fs::write(docs.join("one.txt"), "1").unwrap();
+        std::fs::write(docs.join("sub/two.log"), "2").unwrap();
+        std::fs::write(docs.join("sub/deep/three.txt"), "3").unwrap();
+
+        let s3_client = S3Client::new(
+            "us-east-1",
+            Some("http://pi:4566"),
+            None,
+            true,
+            Some(&StaticCredentials {
+                access_key_id: Some("test".to_string()),
+                secret_access_key: Some("test".to_string()),
+                session_token: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let bucket = "sm-dirupl-flow";
+        if s3_client
+            .client
+            .head_bucket()
+            .bucket(bucket)
+            .send()
+            .await
+            .is_err()
+        {
+            s3_client
+                .client
+                .create_bucket()
+                .bucket(bucket)
+                .send()
+                .await
+                .ok();
+        }
+
+        let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+        let mut state = AppState::new("us-east-1".to_string());
+        state.current_panel = Panel::Objects;
+        state.current_bucket = Some(bucket.to_string());
+        state.input_mode = InputMode::FilePicker;
+        state.file_picker = crate::filepicker::FilePicker::new_at(base.clone());
+
+        // entries are ["..", "docs"]; mark the whole tree with Space.
+        state.file_picker.selected_index = 1;
+        handle_input_key(&mut state, KeyCode::Char(' '), &s3_client, &task_tx).await;
+        assert_eq!(
+            state.file_picker.selection_count(),
+            1,
+            "space marks the directory itself"
+        );
+
+        handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
+        assert_eq!(
+            state.input_mode,
+            InputMode::Metadata,
+            "u enters the metadata editor"
+        );
+        assert_eq!(state.metadata_editor.len(), 1, "single directory listed");
+
+        handle_input_key(&mut state, KeyCode::Char('A'), &s3_client, &task_tx).await;
+        for c in "env".chars() {
+            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+        }
+        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        for c in "prod".chars() {
+            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+        }
+        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        assert_eq!(
+            state.metadata_editor.selected_file().unwrap().1,
+            vec![("env".to_string(), "prod".to_string())],
+            "directory metadata captured"
+        );
+
+        handle_input_key(&mut state, KeyCode::Char('U'), &s3_client, &task_tx).await;
+        assert_eq!(
+            state.input_mode,
+            InputMode::None,
+            "editor closed after upload"
+        );
+
+        let mut report = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while report.is_none() && std::time::Instant::now() < deadline {
+            if let Ok(TaskMessage::FilesUploaded { result }) = task_rx.try_recv() {
+                report = Some(result);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let result = report.expect("upload task reported back");
+        let report = result.unwrap_or_else(|e| panic!("upload failed: {e}"));
+        assert_eq!(
+            report.uploaded.len(),
+            3,
+            "the whole tree is uploaded, folder relative keys kept"
+        );
+
+        for key in [
+            "docs/one.txt",
+            "docs/sub/two.log",
+            "docs/sub/deep/three.txt",
+        ] {
+            let head = s3_client
+                .client
+                .head_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .unwrap_or_else(|_| panic!("expected key {key}"));
+            let meta = head
+                .metadata()
+                .and_then(|m| m.get("env"))
+                .map(|v| v.as_str())
+                .unwrap_or_default();
+            assert_eq!(meta, "prod", "metadata inherited at {key}");
+        }
+        eprintln!("TREE-UPLOAD OK: {report:?}");
     }
 
     #[tokio::test]

@@ -93,7 +93,7 @@ impl S3Client {
             .list_buckets()
             .send()
             .await
-            .context("failed to list S3 buckets")?;
+            .context("error al listar los buckets de S3")?;
 
         let buckets = response
             .buckets()
@@ -129,7 +129,7 @@ impl S3Client {
             .delimiter("/")
             .send()
             .await
-            .with_context(|| format!("failed to list objects in s3://{bucket}/{prefix}"))?;
+            .with_context(|| format!("error al listar objetos en s3://{bucket}/{prefix}"))?;
 
         let mut objects = Vec::new();
 
@@ -190,7 +190,7 @@ impl S3Client {
             .key(key)
             .send()
             .await
-            .with_context(|| format!("failed to delete s3://{bucket}/{key}"))?;
+            .with_context(|| format!("error al borrar s3://{bucket}/{key}"))?;
         Ok(())
     }
 
@@ -210,7 +210,7 @@ impl S3Client {
         let delete = Delete::builder()
             .set_objects(Some(objects))
             .build()
-            .with_context(|| "failed to build delete request")?;
+            .with_context(|| "error al armar la solicitud de borrado")?;
         let resp = self
             .client
             .delete_objects()
@@ -218,7 +218,7 @@ impl S3Client {
             .delete(delete)
             .send()
             .await
-            .with_context(|| format!("failed batch delete in s3://{bucket}/"))?;
+            .with_context(|| format!("error en el borrado por lotes en s3://{bucket}/"))?;
         let errors = resp.errors();
         if !errors.is_empty() {
             let msg = errors
@@ -227,32 +227,31 @@ impl S3Client {
                     format!(
                         "{}: {}",
                         e.key().unwrap_or("?"),
-                        e.message().unwrap_or("unknown error")
+                        e.message().unwrap_or("error desconocido")
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(anyhow::anyhow!("batch delete failed: {msg}"));
+            return Err(anyhow::anyhow!("el borrado por lotes falló: {msg}"));
         }
         Ok(keys.to_vec())
     }
 
+    /// Upload a single local file into `prefix` at the key `prefix + key_suffix`,
+    /// attaching `metadata` when present. Returns the full S3 key.
     pub async fn upload_file(
         &self,
         bucket: &str,
         prefix: &str,
+        key_suffix: &str,
         local_path: &str,
         metadata: &[(String, String)],
     ) -> Result<String> {
-        let file_name = std::path::Path::new(local_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("upload");
-        let key = format!("{prefix}{file_name}");
+        let key = format!("{prefix}{key_suffix}");
 
         let body = aws_sdk_s3::primitives::ByteStream::from_path(local_path)
             .await
-            .with_context(|| format!("failed to read local file {local_path}"))?;
+            .with_context(|| format!("error al leer el archivo local {local_path}"))?;
 
         let mut put = self.client.put_object().bucket(bucket).key(&key).body(body);
         if !metadata.is_empty() {
@@ -261,14 +260,16 @@ impl S3Client {
         }
         put.send()
             .await
-            .with_context(|| format!("failed to upload to s3://{bucket}/{key}"))?;
+            .with_context(|| format!("error al subir a s3://{bucket}/{key}"))?;
 
         Ok(key)
     }
 
-    /// Upload several local files into `prefix`, keying each by its file name
-    /// and attaching its per-file metadata. Returns a per-file report so
-    /// partial failures don't abort the batch.
+    /// Upload several local files (or whole directory trees) into `prefix`,
+    /// keying each by its file name — or by its path relative to the selected
+    /// directory when the selection is a folder — and attaching its per-file
+    /// metadata. Returns a per-file report so partial failures don't abort the
+    /// batch.
     pub async fn upload_files(
         &self,
         bucket: &str,
@@ -276,9 +277,12 @@ impl S3Client {
         files: &[(std::path::PathBuf, Vec<(String, String)>)],
     ) -> UploadReport {
         let mut report = UploadReport::default();
-        for (path, metadata) in files {
+        for (path, key_suffix, metadata) in expand_upload_sources(files) {
             let path_str = path.to_string_lossy();
-            match self.upload_file(bucket, prefix, &path_str, metadata).await {
+            match self
+                .upload_file(bucket, prefix, &key_suffix, &path_str, &metadata)
+                .await
+            {
                 Ok(key) => report.uploaded.push(format!("{bucket}/{key}")),
                 Err(e) => report
                     .failures
@@ -298,7 +302,7 @@ impl S3Client {
             .key(key)
             .send()
             .await
-            .with_context(|| format!("failed to download s3://{bucket}/{key}"))?
+            .with_context(|| format!("error al descargar s3://{bucket}/{key}"))?
             .body;
 
         let bytes = ByteStream::collect(body).await?;
@@ -306,7 +310,7 @@ impl S3Client {
 
         tokio::fs::write(dest_path, bytes)
             .await
-            .with_context(|| format!("failed to write local file {dest_path}"))?;
+            .with_context(|| format!("error al escribir el archivo local {dest_path}"))?;
 
         Ok(())
     }
@@ -347,7 +351,7 @@ impl S3Client {
             .key(key)
             .send()
             .await
-            .with_context(|| format!("failed to head s3://{bucket}/{key}"))?;
+            .with_context(|| format!("error al consultar s3://{bucket}/{key}"))?;
 
         let etag = response.e_tag().map(|s| s.to_string());
         let content_type = response.content_type().map(|s| s.to_string());
@@ -394,5 +398,141 @@ fn map_head_storage_class(sc: &aws_sdk_s3::types::StorageClass) -> StorageClass 
         Aws::DeepArchive => StorageClass::DeepArchive,
         Aws::Snow => StorageClass::Snow,
         other => StorageClass::Unknown(other.as_str().to_string()),
+    }
+}
+
+/// Statically walk `root`, collecting every file (recursing into subdirectories)
+/// as `(local_path, key)` where `key` is the path relative to the selected
+/// top-level directory. Symlinks are treated as files. The whole subtree is
+/// accumulated into `out` and sorted by key for a deterministic order.
+fn collect_dir_files(
+    root: &std::path::Path,
+    base_key: &str,
+    out: &mut Vec<(std::path::PathBuf, String)>,
+) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut acc: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type().ok().is_some_and(|ft| ft.is_dir());
+        let name = entry.file_name().to_string_lossy().replace('\\', "/");
+        let key = format!("{base_key}{name}");
+        if file_type {
+            collect_dir_files(&path, &format!("{key}/"), &mut acc);
+        } else {
+            acc.push((path, key));
+        }
+    }
+    acc.sort_by(|a, b| a.1.cmp(&b.1));
+    out.extend(acc);
+}
+
+/// A single upload unit: (local path, S3 key suffix, per-file metadata).
+pub type UploadSource = (std::path::PathBuf, String, Vec<(String, String)>);
+
+// Flatten a selection of local paths into the `(local_path, key, metadata)`
+// units the uploader consumes.
+//
+// - A plain file keeps its file name as the key suffix.
+// - A directory is walked recursively; each file under it keeps the path
+//   relative to the selected folder (`folder/a/b.txt`), inheriting the
+//   metadata of the directory entry. Empty directories contribute nothing.
+//
+// The order is: selection order first, then each directory's files sorted by
+// key for a deterministic listing.
+pub fn expand_upload_sources(
+    selections: &[(std::path::PathBuf, Vec<(String, String)>)],
+) -> Vec<UploadSource> {
+    let mut out: Vec<UploadSource> = Vec::new();
+    for (path, metadata) in selections {
+        if path.is_dir() {
+            let dir_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("upload");
+            let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+            collect_dir_files(
+                path,
+                &format!("{}/", dir_name.replace('\\', "/")),
+                &mut files,
+            );
+            out.extend(files.into_iter().map(|(p, k)| (p, k, metadata.clone())));
+        } else {
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| "upload".to_string());
+            out.push((path.clone(), file_name, metadata.clone()));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("s3tui-s3-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn expand_keeps_file_names_and_inherits_metadata() {
+        let tmp = temp_dir("flat");
+        fs::write(tmp.join("one.txt"), "1").unwrap();
+
+        let expanded = expand_upload_sources(&[(
+            tmp.join("one.txt"),
+            vec![("env".to_string(), "prod".to_string())],
+        )]);
+
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].1, "one.txt");
+        assert_eq!(expanded[0].2, vec![("env".to_string(), "prod".to_string())]);
+    }
+
+    #[test]
+    fn expand_recurses_directory_trees_preserving_keys() {
+        let tmp = temp_dir("tree");
+        fs::create_dir_all(tmp.join("docs/sub/deep")).unwrap();
+        fs::write(tmp.join("docs/root.txt"), "r").unwrap();
+        fs::write(tmp.join("docs/sub/nested.log"), "n").unwrap();
+        fs::write(tmp.join("docs/sub/deep/inner.txt"), "i").unwrap();
+
+        let expanded = expand_upload_sources(&[(
+            tmp.join("docs"),
+            vec![("team".to_string(), "infra".to_string())],
+        )]);
+
+        let keys: Vec<&str> = expanded.iter().map(|(_, k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "docs/root.txt",
+                "docs/sub/deep/inner.txt",
+                "docs/sub/nested.log"
+            ],
+            "directory order: sorted by key, relative to the selected folder"
+        );
+        assert!(
+            expanded
+                .iter()
+                .all(|(_, _, m)| m == &vec![("team".to_string(), "infra".to_string())])
+        );
+    }
+
+    #[test]
+    fn expand_skips_empty_directories() {
+        let tmp = temp_dir("empty");
+        fs::create_dir_all(tmp.join("solo")).unwrap();
+
+        let expanded = expand_upload_sources(&[(tmp.join("solo"), vec![])]);
+        assert!(expanded.is_empty(), "empty folders upload nothing");
     }
 }
