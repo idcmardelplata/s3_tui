@@ -1,0 +1,26 @@
+# s3-tui configuration
+# Location: $HOME/.config/s3-tui/config.toml
+# A missing file is fine; every field below is optional and has a sensible default.
+
+# AWS region. Overridden by the AWS_REGION environment variable.
+region = "us-east-1"
+
+# S3 endpoint. Most useful with LocalStack / MinIO / S3-compatible services.
+# Overridden by the S3_ENDPOINT environment variable. Defaults to http://pi:4566.
+endpoint = "http://pi:4566"
+
+# Use path-style URLs (bucket in the request path instead of a subdomain).
+# Defaults to true; set to false for virtual-hosted-style real AWS.
+force_path_style = true
+
+# Named profile from ~/.aws/credentials to use for credential resolution.
+# When unset, the standard AWS credential chain applies.
+#profile = "localstack"
+
+# Static credentials. When this table is omitted, the standard AWS credential
+# chain is used (env vars, ~/.aws/credentials, IAM role, etc.). Only the
+# access_key_id / secret_access_key pair is required to enable this.
+# [credentials]
+# access_key_id = "test"
+# secret_access_key = "test"
+# session_token = ""
