@@ -57,12 +57,14 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
             Constraint::Min(1),
             Constraint::Length(3),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
     render_main(frame, state, &theme, chunks[0]);
     render_status_bar(frame, state, &theme, chunks[1]);
     render_tab_bar(frame, state, &theme, chunks[2]);
+    render_legend(frame, state, &theme, chunks[3]);
 
     match state.input_mode {
         InputMode::FilePicker => render_file_picker(frame, state, &theme),
@@ -567,6 +569,23 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
 
     frame.render_widget(status, chunks[0]);
     frame.render_widget(help, chunks[1]);
+}
+
+/// Author legend pinned at the very bottom of every screen.
+fn render_legend(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
+    let _ = state;
+    let legend = Paragraph::new(Line::from(vec![
+        Span::styled(" s3-tui ", panel_title(theme)),
+        Span::styled("author: ", Style::default().fg(theme.text_dim)),
+        Span::styled(
+            "@idcmardelplata",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(Block::default().borders(Borders::NONE));
+    frame.render_widget(legend, area);
 }
 
 /// Full-screen overlay listing the current directory so one or more local
@@ -1158,6 +1177,34 @@ mod tests {
         state.input_buffer = "/tmp/downloads".to_string();
         let buffer = draw(&mut state, 120, 30);
         assert!(locate(&buffer, "Enter destination directory").is_some());
+    }
+
+    #[test]
+    fn renders_author_legend_at_the_bottom() {
+        let mut state = sample_state();
+        let buffer = draw(&mut state, 120, 30);
+        assert!(
+            locate(&buffer, "@idcmardelplata").is_some(),
+            "author legend is visible"
+        );
+        let legend_color = {
+            let theme = theme::from_id("dracula");
+            theme.accent
+        };
+        let found = (0..buffer.area.height).find_map(|y| {
+            (0..buffer.area.width)
+                .find(|&x| {
+                    buffer
+                        .cell((x, y))
+                        .map(|c| c.symbol() == "@")
+                        .unwrap_or(false)
+                })
+                .map(|x| (x, y))
+        });
+        let (x, y) = found.expect("author legend in bottom rows");
+        assert_eq!(y, 29, "legend is the last row");
+        let cell = buffer.cell((x, y)).unwrap();
+        assert_eq!(cell.fg, legend_color, "author name uses accent color");
     }
 
     #[test]
