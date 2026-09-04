@@ -45,7 +45,7 @@ async fn run_app(
 
     // Load buckets on startup
     state.loading_state = LoadingState::Loading("Loading buckets...".to_string());
-    terminal.draw(|frame| ui::render(frame, &state))?;
+    terminal.draw(|frame| ui::render(frame, &mut state))?;
 
     let client = s3_client.client.clone();
     let region_owned = region.to_string();
@@ -64,7 +64,7 @@ async fn run_app(
     });
 
     loop {
-        terminal.draw(|frame| ui::render(frame, &state))?;
+        terminal.draw(|frame| ui::render(frame, &mut state))?;
 
         // Drain task queue
         while let Ok(message) = task_rx.try_recv() {
