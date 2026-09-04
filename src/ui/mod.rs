@@ -64,8 +64,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     render_status_bar(frame, state, &theme, chunks[1]);
     render_tab_bar(frame, state, &theme, chunks[2]);
 
-    if state.input_mode != InputMode::None {
-        render_input_popup(frame, state, &theme);
+    match state.input_mode {
+        InputMode::FilePicker => render_file_picker(frame, state, &theme),
+        InputMode::None => {}
+        _ => render_input_popup(frame, state, &theme),
     }
 }
 
@@ -547,6 +549,169 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
     frame.render_widget(help, chunks[1]);
 }
 
+/// Full-screen overlay listing the current directory so one or more local
+/// files can be picked (with fuzzy filtering) and uploaded in a batch.
+fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
+    let area = frame.area();
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    {
+        let picker = &mut state.file_picker;
+        let visible_total = picker.visible_count();
+        let inner_height = chunks[0].height.saturating_sub(2);
+        if visible_total > 0 {
+            let sel = picker.selected_index.min(visible_total - 1);
+            if sel < picker.scroll_offset {
+                picker.scroll_offset = sel;
+            } else if picker.scroll_offset + inner_height as usize <= sel {
+                picker.scroll_offset = sel.saturating_sub(inner_height as usize - 1);
+            }
+        }
+
+        let visible = picker.visible_indices();
+
+        let items: Vec<ListItem> = visible
+            .iter()
+            .enumerate()
+            .map(|(pos, &real_idx)| {
+                let entry = &picker.entries[real_idx];
+                let is_selected = pos == picker.selected_index;
+                let is_marked = picker.selection.iter().any(|p| p == &entry.path);
+
+                let base = if entry.is_dir {
+                    Style::default().fg(theme.info)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                let style = if is_selected {
+                    base.add_modifier(Modifier::BOLD)
+                } else {
+                    base
+                };
+
+                let check = if entry.is_dir {
+                    " "
+                } else if is_marked {
+                    "\u{2713}"
+                } else {
+                    " "
+                };
+                let check_style = if is_marked {
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text_dim)
+                };
+
+                let display = if entry.is_dir {
+                    format!("{}/", entry.name)
+                } else {
+                    entry.name.clone()
+                };
+                let size = entry
+                    .size
+                    .map(|s| format!("{:>10}", bytesize::ByteSize(s).to_string()))
+                    .unwrap_or_else(|| format!("{:>10}", "-"));
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("[{check}]"), check_style),
+                    Span::styled(format!(" {display} "), style),
+                    Span::styled(size, Style::default().fg(theme.text_dim)),
+                ]))
+            })
+            .collect();
+
+        let mut title = format!("Select files · {}", picker.dir.display());
+        if !picker.filter.is_empty() {
+            title = format!("{title}  [filter: '{}']", picker.filter);
+        }
+        let block = Block::default()
+            .title(Line::from(Span::styled(
+                centered_title(&title),
+                panel_title(theme),
+            )))
+            .title_bottom(Line::from(Span::styled(
+                format!(
+                    "{} selected | {}/{} shown",
+                    picker.selection_count(),
+                    visible.len(),
+                    picker.entries.len().saturating_sub(1)
+                ),
+                Style::default().fg(theme.text_dim),
+            )))
+            .borders(Borders::ALL)
+            .border_style(panel_border(theme, true))
+            .padding(Padding::horizontal(1));
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(selected_row(theme));
+
+        let mut list_state = ListState::default();
+        if !visible.is_empty() {
+            list_state.select(Some(picker.selected_index.min(visible.len() - 1)));
+        }
+        *list_state.offset_mut() = picker.scroll_offset.min(visible.len().saturating_sub(1));
+
+        if visible.len() > inner_height as usize && !visible.is_empty() {
+            render_scrollbar(
+                frame,
+                chunks[0],
+                picker.selected_index,
+                visible.len(),
+                theme,
+            );
+        }
+
+        frame.render_stateful_widget(list, chunks[0], &mut list_state);
+    }
+
+    // Filter line: shows the fuzzy query, the path and any directory error.
+    let filter_text = if picker_is_loading_error(state) {
+        format!(" {}", state.file_picker.hint)
+    } else if state.file_picker.filter.is_empty() {
+        " Type to fuzzy-filter files (subsequence match)".to_string()
+    } else {
+        format!(" /{}", state.file_picker.filter)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            filter_text,
+            Style::default().fg(theme.info),
+        )))
+        .block(Block::default().borders(Borders::NONE)),
+        chunks[1],
+    );
+
+    // Key hints (second-to-last line is the path, still in the list block).
+    let hints = format!(
+        " {} | ↑↓:move · Enter/→:open dir · Space:mark/unmark · a:all · c:clear · u:upload · Esc:back ",
+        state.file_picker.dir.display()
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hints,
+            Style::default().fg(theme.text_dim),
+        )))
+        .block(Block::default().borders(Borders::NONE))
+        .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
+
+/// True while the picker failed to read its directory (hint is set).
+fn picker_is_loading_error(state: &AppState) -> bool {
+    !state.file_picker.hint.is_empty()
+}
+
 fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let area = frame.area();
     let popup = centered_rect(70, 10, area);
@@ -555,9 +720,9 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
 
     let (title, border_color) = match state.input_mode {
         InputMode::Confirm => (" Confirm (y/n) ", theme.error),
-        InputMode::Path => (" Enter local file path to upload ", theme.info),
         InputMode::Directory => (" Enter destination directory ", theme.warning),
         InputMode::Filter => (" Filter objects (type to search) ", theme.accent),
+        InputMode::FilePicker => (" Select files to upload ", theme.info),
         InputMode::None => (" Input ", theme.text_dim),
     };
 
@@ -576,9 +741,9 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     // A short descriptive line above the field.
     let helper = match state.input_mode {
         InputMode::Confirm => "Deleting this object cannot be undone. Type y to confirm.",
-        InputMode::Path => "Enter the path of the local file you want to upload.",
         InputMode::Directory => "Enter the destination directory for the download.",
         InputMode::Filter => "Type to filter objects. Enter applies it, Esc clears it.",
+        InputMode::FilePicker => "Select one or more files. u starts the upload.",
         InputMode::None => "",
     };
     frame.render_widget(
@@ -590,10 +755,7 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     );
 
     // Input field with a visible cursor for editable modes.
-    let editable = matches!(
-        state.input_mode,
-        InputMode::Path | InputMode::Directory | InputMode::Filter
-    );
+    let editable = matches!(state.input_mode, InputMode::Directory | InputMode::Filter);
     let field_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
@@ -768,10 +930,10 @@ mod tests {
     #[test]
     fn renders_input_popup() {
         let mut state = sample_state();
-        state.input_mode = InputMode::Path;
-        state.input_buffer = "/tmp/foo.txt".to_string();
+        state.input_mode = InputMode::Directory;
+        state.input_buffer = "/tmp/downloads".to_string();
         let buffer = draw(&mut state, 120, 30);
-        assert!(locate(&buffer, "Enter local file path").is_some());
+        assert!(locate(&buffer, "Enter destination directory").is_some());
     }
 
     #[test]

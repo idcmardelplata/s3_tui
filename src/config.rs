@@ -46,10 +46,11 @@ pub struct StaticCredentials {
 }
 
 impl AwsConfig {
-    /// Effective region: `AWS_REGION` env var > config file > default.
+    /// Effective region: `AWS_REGION` > `AWS_DEFAULT_REGION` > config > default.
     pub fn effective_region(&self) -> String {
         std::env::var("AWS_REGION")
             .ok()
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
             .or_else(|| self.region.clone())
             .unwrap_or_else(|| DEFAULT_REGION.to_string())
     }
@@ -71,6 +72,11 @@ impl AwsConfig {
 
 /// Default TOML written on first run: LocalStack-compatible defaults.
 pub const DEFAULT_CONFIG_TOML: &str = r#"# s3-tui configuration
+#
+# Every value can also be given from the command line (--region, --endpoint,
+# --profile, --access-key, --secret-key) or via the usual AWS/S3 environment
+# variables (AWS_REGION, AWS_DEFAULT_REGION, S3_ENDPOINT, AWS_PROFILE,
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY). Precedence: CLI > env > config.
 region = "us-east-1"
 endpoint = "http://pi:4566"
 force_path_style = true
@@ -82,6 +88,8 @@ force_path_style = true
 theme = "catppuccin"
 
 [credentials]
+# Static credentials. When omitted, the standard AWS credential chain is used
+# (env vars, ~/.aws/credentials, IAM roles on EC2, etc.).
 access_key_id = "test"
 secret_access_key = "test"
 "#;
@@ -212,5 +220,39 @@ session_token = "token"
         assert_eq!(cfg.endpoint.as_deref(), Some("http://pi:4566"));
 
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn effective_region_prefers_env_vars_over_config() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("AWS_REGION", "sa-east-1");
+            std::env::set_var("AWS_DEFAULT_REGION", "eu-central-1");
+        }
+        let cfg: AwsConfig = toml::from_str("region = \"us-west-2\"\n").unwrap();
+        assert_eq!(cfg.effective_region(), "sa-east-1", "AWS_REGION wins");
+
+        unsafe {
+            std::env::remove_var("AWS_REGION");
+        }
+        assert_eq!(
+            cfg.effective_region(),
+            "eu-central-1",
+            "AWS_DEFAULT_REGION is the next fallback"
+        );
+
+        unsafe {
+            std::env::remove_var("AWS_DEFAULT_REGION");
+        }
+        assert_eq!(cfg.effective_region(), "us-west-2", "config region");
+
+        assert_eq!(
+            AwsConfig::default().effective_region(),
+            DEFAULT_REGION,
+            "default region"
+        );
     }
 }

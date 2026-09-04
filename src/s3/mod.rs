@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use chrono::DateTime;
 
-use crate::app::{BucketInfo, DownloadReport, ObjectDetail, ObjectInfo, StorageClass};
+use crate::app::{
+    BucketInfo, DownloadReport, ObjectDetail, ObjectInfo, StorageClass, UploadReport,
+};
+use crate::config::StaticCredentials;
 
 fn map_storage_class(sc: &aws_sdk_s3::types::ObjectStorageClass) -> StorageClass {
     use aws_sdk_s3::types::ObjectStorageClass as Aws;
@@ -35,19 +38,49 @@ impl S3Client {
         }
     }
 
-    pub async fn new_with_endpoint(region: &str, endpoint: Option<&str>) -> Result<Self> {
-        let config = aws_config::from_env()
-            .region(aws_config::Region::new(region.to_string()))
-            .load()
-            .await;
+    /// Build a client from fully resolved settings. Credentials kept explicit:
+    /// static credentials (from CLI or config) and named profiles replace the
+    /// standard credential chain; otherwise the chain (env vars, shared config
+    /// file, IAM roles, ...) is used as-is.
+    pub async fn new(
+        region: &str,
+        endpoint: Option<&str>,
+        profile: Option<&str>,
+        force_path_style: bool,
+        credentials: Option<&StaticCredentials>,
+    ) -> Result<Self> {
+        let mut loader = aws_config::from_env();
+        if let Some(profile) = profile.filter(|p| !p.is_empty()) {
+            loader = loader.profile_name(profile);
+        }
+        let base = loader.load().await;
 
-        let mut s3_builder = aws_sdk_s3::config::Builder::from(&config);
-        if let Some(endpoint) = endpoint {
-            s3_builder = s3_builder.endpoint_url(endpoint).force_path_style(true);
+        let mut s3_builder = aws_sdk_s3::config::Builder::from(&base);
+        s3_builder = s3_builder.region(aws_config::Region::new(region.to_string()));
+
+        if let Some(endpoint) = endpoint.filter(|e| !e.is_empty()) {
+            s3_builder = s3_builder
+                .endpoint_url(endpoint)
+                .force_path_style(force_path_style);
+        }
+
+        if let (Some(ak), Some(sk)) = (
+            credentials.and_then(|c| c.access_key_id.as_deref()),
+            credentials.and_then(|c| c.secret_access_key.as_deref()),
+        ) {
+            let session_token = credentials
+                .and_then(|c| c.session_token.as_deref())
+                .map(str::to_string);
+            s3_builder = s3_builder.credentials_provider(aws_sdk_s3::config::Credentials::new(
+                ak,
+                sk,
+                session_token,
+                None,
+                "s3-tui",
+            ));
         }
 
         let client = Client::from_conf(s3_builder.build());
-
         Ok(Self {
             client,
             region: region.to_string(),
@@ -187,6 +220,27 @@ impl S3Client {
             .with_context(|| format!("failed to upload to s3://{bucket}/{key}"))?;
 
         Ok(key)
+    }
+
+    /// Upload several local files into `prefix`, keying each by its file name.
+    /// Returns a per-file report so partial failures don't abort the batch.
+    pub async fn upload_files(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        local_paths: &[std::path::PathBuf],
+    ) -> UploadReport {
+        let mut report = UploadReport::default();
+        for path in local_paths {
+            let path_str = path.to_string_lossy();
+            match self.upload_file(bucket, prefix, &path_str).await {
+                Ok(key) => report.uploaded.push(format!("{bucket}/{key}")),
+                Err(e) => report
+                    .failures
+                    .push((path.display().to_string(), e.to_string())),
+            }
+        }
+        report
     }
 
     pub async fn download_file(&self, bucket: &str, key: &str, dest_path: &str) -> Result<()> {

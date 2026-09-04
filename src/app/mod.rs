@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 
+use crate::filepicker::FilePicker;
 use crate::ui::theme::{Theme, resolve};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +82,7 @@ pub struct ObjectInfo {
 pub enum InputMode {
     None,
     Confirm,
-    Path,
+    FilePicker,
     Directory,
     Filter,
 }
@@ -105,6 +106,13 @@ pub struct DownloadReport {
     pub failures: Vec<(String, String)>,
 }
 
+/// Summary produced by a batch upload of multiple local files.
+#[derive(Debug, Clone, Default)]
+pub struct UploadReport {
+    pub uploaded: Vec<String>,
+    pub failures: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum PendingAction {
     None,
@@ -121,8 +129,8 @@ pub enum TaskMessage {
         prefix: String,
         result: Result<Vec<ObjectInfo>, String>,
     },
-    ObjectUploaded {
-        result: Result<String, String>,
+    FilesUploaded {
+        result: Result<UploadReport, String>,
     },
     ObjectDownloaded {
         result: Result<String, String>,
@@ -160,6 +168,8 @@ pub struct AppState {
     pub selected_keys: HashSet<String>,
     /// The active `ratatui-themekit` palette, resolved once at startup.
     pub theme: Theme,
+    /// Local file browser used by the multi-file upload flow.
+    pub file_picker: FilePicker,
 }
 
 impl AppState {
@@ -183,6 +193,7 @@ impl AppState {
             selected_object_detail: None,
             selected_keys: HashSet::new(),
             theme: resolve(),
+            file_picker: FilePicker::new(),
         }
     }
 

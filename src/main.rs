@@ -1,27 +1,31 @@
 mod app;
+mod cli;
 mod config;
 mod errors;
+mod filepicker;
 mod s3;
 mod ui;
 
 use anyhow::{Context, Result};
 use app::{AppState, InputMode, LoadingState, Panel, PendingAction, TaskMessage};
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use s3::S3Client;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = cli::Cli::parse();
     let _ = config::ensure_default_config();
     let config = config::load().unwrap_or_default();
-    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| config.effective_region());
-    let endpoint = std::env::var("S3_ENDPOINT").unwrap_or_else(|_| config.effective_endpoint());
+    let settings = cli::ResolvedSettings::from_parts(&cli, &config);
 
     let mut terminal = ratatui::init();
-    let result = run_app(&mut terminal, &region, &endpoint).await;
+    let result = run_app(&mut terminal, &settings).await;
     ratatui::restore();
 
     if let Err(err) = result {
@@ -33,13 +37,27 @@ async fn main() -> Result<()> {
 
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    region: &str,
-    endpoint: &str,
+    settings: &cli::ResolvedSettings,
 ) -> Result<()> {
-    let mut state = AppState::new(region.to_string());
-    let s3_client = S3Client::new_with_endpoint(region, Some(endpoint))
-        .await
-        .with_context(|| format!("failed to create S3 client with endpoint {endpoint}"))?;
+    let mut state = AppState::new(settings.region.clone());
+    let s3_client = S3Client::new(
+        &settings.region,
+        settings.endpoint.as_deref(),
+        settings.profile.as_deref(),
+        settings.force_path_style,
+        settings.credentials.as_ref(),
+    )
+    .await
+    .with_context(|| {
+        let endpoint = settings
+            .endpoint
+            .as_deref()
+            .unwrap_or("(AWS default addressing)");
+        format!(
+            "failed to create S3 client for region {} via {endpoint}",
+            settings.region
+        )
+    })?;
 
     let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
     let bucket_tx = task_tx.clone();
@@ -49,7 +67,7 @@ async fn run_app(
     terminal.draw(|frame| ui::render(frame, &mut state))?;
 
     let client = s3_client.client.clone();
-    let region_owned = region.to_string();
+    let region_owned = settings.region.clone();
     tokio::spawn(async move {
         match S3Client::from_client(client, &region_owned)
             .list_buckets()
@@ -123,9 +141,25 @@ fn handle_task_message(
             }
             state.loading_state = LoadingState::Idle;
         }
-        TaskMessage::ObjectUploaded { result } => {
+        TaskMessage::FilesUploaded { result } => {
             match result {
-                Ok(key) => state.status_message = format!("Uploaded s3://{}", key),
+                Ok(report) => {
+                    let ok = report.uploaded.len();
+                    let fail = report.failures.len();
+                    state.status_message = if fail == 0 {
+                        format!("Uploaded {ok} file(s)")
+                    } else {
+                        format!(
+                            "Uploaded {ok}, failed {fail}: {}",
+                            report
+                                .failures
+                                .iter()
+                                .map(|(path, _)| path.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                }
                 Err(e) => state.status_message = format!("Upload failed: {e}"),
             }
             state.loading_state = LoadingState::Idle;
@@ -209,7 +243,7 @@ async fn handle_key(
         }
         KeyCode::Char('?') => {
             state.status_message =
-                "Help: q:quit | u:upload | g:download | d:delete | Space:select | a:all | c:clear | Enter:open | ←:back | ↑↓:nav"
+                "Help: q:quit | u:upload(multi) | g:download | d:delete | Space:select | a:all | c:clear | Enter:open | ←:back | ↑↓:nav"
                     .to_string();
         }
         KeyCode::Up | KeyCode::Char('k') => state.select_prev(),
@@ -237,9 +271,13 @@ async fn handle_key(
             }
         }
         KeyCode::Char('u') | KeyCode::Char('U') => {
-            if state.current_panel == Panel::Objects && state.current_bucket.is_some() {
-                state.start_input(InputMode::Path, "");
+            if state.current_bucket.is_none() {
+                state.status_message = "Select a bucket first (Enter) to upload files".to_string();
+            } else {
+                state.file_picker.reset();
+                state.start_input(InputMode::FilePicker, "");
                 state.pending_action = PendingAction::None;
+                state.status_message = "Pick files to upload (Space marks, u uploads)".to_string();
             }
         }
         KeyCode::Char('g') | KeyCode::Char('G') => {
@@ -368,26 +406,81 @@ async fn handle_input_key(
             }
             _ => {}
         },
-        InputMode::Path => match code {
-            KeyCode::Char(c) => state.input_buffer.push(c),
-            KeyCode::Backspace => {
-                state.input_buffer.pop();
+        InputMode::FilePicker => match code {
+            KeyCode::Up | KeyCode::Char('k') => state.file_picker.select_prev(),
+            KeyCode::Down | KeyCode::Char('j') => state.file_picker.select_next(),
+            KeyCode::Enter | KeyCode::Right => {
+                if !state.file_picker.enter() {
+                    state.file_picker.toggle_selected();
+                }
             }
-            KeyCode::Enter => {
-                let local_path = state.input_buffer.trim().to_string();
-                state.cancel_input();
-                if local_path.is_empty() {
-                    state.status_message = "No file path provided".to_string();
+            KeyCode::Left => {
+                if state.file_picker.filter.is_empty() {
+                    state.file_picker.go_up();
+                } else {
+                    state.file_picker.filter.pop();
+                    state.file_picker.selected_index = 0;
+                }
+            }
+            KeyCode::Backspace => {
+                if state.file_picker.filter.is_empty() {
+                    state.file_picker.go_up();
+                } else {
+                    state.file_picker.filter.pop();
+                    state.file_picker.selected_index = 0;
+                }
+            }
+            KeyCode::Char(' ') => {
+                let before = state.file_picker.selection_count();
+                state.file_picker.toggle_selected();
+                let after = state.file_picker.selection_count();
+                state.status_message = if after > before {
+                    format!("Marked ({after} selected) - press u to upload")
+                } else if after < before {
+                    format!("Unmarked ({after} selected)")
+                } else {
+                    format!("{after} selected (directories open with Enter)")
+                };
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                state.file_picker.select_all_visible();
+                let n = state.file_picker.selection_count();
+                state.status_message = format!("Selected {n} file(s)");
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                state.file_picker.clear_selection();
+                state.status_message = "Selection cleared".to_string();
+            }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                let paths = state.file_picker.selected_paths();
+                if paths.is_empty() {
+                    state.status_message =
+                        "No files marked - press Space on a file first".to_string();
                 } else if let Some(bucket) = state.current_bucket.clone() {
                     let prefix = state.current_prefix.clone();
+                    let n = paths.len();
+                    state.cancel_input();
                     state.loading_state =
-                        LoadingState::Loading(format!("Uploading {local_path}..."));
-                    spawn_upload(s3_client, task_tx, &bucket, &prefix, &local_path);
+                        LoadingState::Loading(format!("Uploading {n} file(s)..."));
+                    spawn_upload_many(s3_client, task_tx, &bucket, &prefix, paths);
+                } else {
+                    state.status_message =
+                        "Select a bucket first, then press u to upload".to_string();
                 }
             }
             KeyCode::Esc => {
-                state.cancel_input();
-                state.status_message = "Upload cancelled".to_string();
+                if state.file_picker.filter.is_empty() {
+                    state.cancel_input();
+                    state.status_message = "Upload cancelled".to_string();
+                } else {
+                    state.file_picker.filter.clear();
+                    state.file_picker.selected_index = 0;
+                    state.status_message = "Filter cleared".to_string();
+                }
+            }
+            KeyCode::Char(c) => {
+                state.file_picker.filter.push(c);
+                state.file_picker.selected_index = 0;
             }
             _ => {}
         },
@@ -488,27 +581,22 @@ fn spawn_list_objects(
     });
 }
 
-fn spawn_upload(
+fn spawn_upload_many(
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
     bucket: &str,
     prefix: &str,
-    local_path: &str,
+    paths: Vec<PathBuf>,
 ) {
     let tx = task_tx.clone();
     let client = s3_client.client.clone();
     let bucket = bucket.to_string();
     let prefix = prefix.to_string();
-    let local_path = local_path.to_string();
     tokio::spawn(async move {
-        let result = match S3Client::from_client(client, "")
-            .upload_file(&bucket, &prefix, &local_path)
-            .await
-        {
-            Ok(key) => Ok(format!("{bucket}/{key}")),
-            Err(e) => Err(e.to_string()),
-        };
-        let _ = tx.send(TaskMessage::ObjectUploaded { result });
+        let report = S3Client::from_client(client, "")
+            .upload_files(&bucket, &prefix, &paths)
+            .await;
+        let _ = tx.send(TaskMessage::FilesUploaded { result: Ok(report) });
     });
 }
 
@@ -576,4 +664,93 @@ fn spawn_get_object_info(
         };
         let _ = tx.send(TaskMessage::ObjectDetailLoaded(result));
     });
+}
+
+#[cfg(test)]
+mod picker_flow_smoke {
+    use super::*;
+    use crate::config::StaticCredentials;
+
+    #[tokio::test]
+    async fn space_marks_and_u_uploads() {
+        if std::env::var("S3_REGRESSION").as_deref() != Ok("1") {
+            eprintln!("skipping (set S3_REGRESSION=1 to run)");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("s3tui-flow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one.txt"), "1").unwrap();
+        std::fs::write(dir.join("two.txt"), "2").unwrap();
+
+        let s3_client = S3Client::new(
+            "us-east-1",
+            Some("http://pi:4566"),
+            None,
+            true,
+            Some(&StaticCredentials {
+                access_key_id: Some("test".to_string()),
+                secret_access_key: Some("test".to_string()),
+                session_token: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let bucket = "sm-picker-flow";
+        if s3_client
+            .client
+            .head_bucket()
+            .bucket(bucket)
+            .send()
+            .await
+            .is_err()
+        {
+            s3_client
+                .client
+                .create_bucket()
+                .bucket(bucket)
+                .send()
+                .await
+                .ok();
+        }
+
+        let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+        let mut state = AppState::new("us-east-1".to_string());
+        state.current_panel = Panel::Objects;
+        state.current_bucket = Some(bucket.to_string());
+        state.input_mode = InputMode::FilePicker;
+        state.file_picker = crate::filepicker::FilePicker::new_at(dir.clone());
+
+        // one.txt is entries[1], two.txt is entries[2].
+        state.file_picker.selected_index = 1;
+        handle_input_key(&mut state, KeyCode::Char(' '), &s3_client, &task_tx).await;
+        state.file_picker.selected_index = 2;
+        handle_input_key(&mut state, KeyCode::Char(' '), &s3_client, &task_tx).await;
+        assert_eq!(
+            state.file_picker.selection_count(),
+            2,
+            "space marks two files"
+        );
+
+        handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
+        assert_eq!(
+            state.input_mode,
+            InputMode::None,
+            "picker closed after upload"
+        );
+
+        let mut report = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while report.is_none() && std::time::Instant::now() < deadline {
+            if let Ok(TaskMessage::FilesUploaded { result }) = task_rx.try_recv() {
+                report = Some(result);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let result = report.expect("upload task reported back");
+        let report = result.unwrap_or_else(|e| panic!("upload failed: {e}"));
+        assert_eq!(report.uploaded.len(), 2, "both marked files uploaded");
+        eprintln!("FLOW OK: {report:?}");
+    }
 }
