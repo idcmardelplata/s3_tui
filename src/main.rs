@@ -7,7 +7,7 @@ mod s3;
 mod ui;
 
 use anyhow::{Context, Result};
-use app::{AppState, InputMode, LoadingState, Panel, PendingAction, TaskMessage};
+use app::{AppState, InputMode, LoadingState, MetadataField, Panel, PendingAction, TaskMessage};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -187,6 +187,22 @@ fn handle_task_message(
                 state.loading_state = LoadingState::Idle;
             }
         }
+        TaskMessage::ObjectsDeleted { result } => {
+            match result {
+                Ok(keys) => {
+                    state.status_message = format!("Deleted {} object(s)", keys.len());
+                }
+                Err(e) => state.status_message = format!("Batch delete failed: {e}"),
+            }
+            state.clear_selection();
+            if let Some(bucket) = state.current_bucket.as_deref() {
+                let prefix = state.current_prefix.clone();
+                spawn_list_objects(s3_client, task_tx, bucket, &prefix);
+                state.loading_state = LoadingState::Loading("Refreshing...".to_string());
+            } else {
+                state.loading_state = LoadingState::Idle;
+            }
+        }
         TaskMessage::ObjectDetailLoaded(result) => match result {
             Ok(detail) => {
                 state.selected_object_detail = Some(detail.clone());
@@ -330,14 +346,30 @@ async fn handle_key(
         KeyCode::Char('d') => {
             if state.current_panel == Panel::Objects {
                 let bucket = state.current_bucket.clone();
-                let selected = state
+                let selected_keys = state.selected_keys_in_visible();
+                let single = state
                     .selected_object()
                     .map(|o| (o.key.clone(), o.is_folder));
-                if let (Some(bucket), Some((key, is_folder))) = (bucket, selected)
+
+                if let Some(bucket) = bucket.as_deref()
+                    && !selected_keys.is_empty()
+                {
+                    let n = selected_keys.len();
+                    state.start_input(InputMode::Confirm, "");
+                    state.status_message =
+                        format!("Delete {n} selected object(s)? Press y to confirm");
+                    state.pending_action = PendingAction::DeleteMany {
+                        bucket: bucket.to_string(),
+                        keys: selected_keys,
+                    };
+                } else if let (Some(bucket), Some((key, is_folder))) = (bucket.as_deref(), single)
                     && !is_folder
                 {
                     state.start_input(InputMode::Confirm, "");
-                    state.pending_action = PendingAction::DeleteObject { bucket, key };
+                    state.pending_action = PendingAction::DeleteObject {
+                        bucket: bucket.to_string(),
+                        key,
+                    };
                 }
             }
         }
@@ -382,22 +414,44 @@ async fn handle_input_key(
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let action = std::mem::replace(&mut state.pending_action, PendingAction::None);
                 state.cancel_input();
-                if let PendingAction::DeleteObject { bucket, key } = action {
-                    let tx = task_tx.clone();
-                    let client = s3_client.client.clone();
-                    let key_for_msg = key.clone();
-                    tokio::spawn(async move {
-                        let result = match S3Client::from_client(client, "")
-                            .delete_object(&bucket, &key)
-                            .await
-                        {
-                            Ok(()) => Ok(key),
-                            Err(e) => Err(e.to_string()),
-                        };
-                        let _ = tx.send(TaskMessage::ObjectDeleted { result });
-                    });
-                    state.loading_state =
-                        LoadingState::Loading(format!("Deleting {key_for_msg}..."));
+                match action {
+                    PendingAction::DeleteObject { bucket, key } => {
+                        let tx = task_tx.clone();
+                        let client = s3_client.client.clone();
+                        let key_for_msg = key.clone();
+                        tokio::spawn(async move {
+                            let result = match S3Client::from_client(client, "")
+                                .delete_object(&bucket, &key)
+                                .await
+                            {
+                                Ok(()) => Ok(key),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(TaskMessage::ObjectDeleted { result });
+                        });
+                        state.loading_state =
+                            LoadingState::Loading(format!("Deleting {key_for_msg}..."));
+                    }
+                    PendingAction::DeleteMany { bucket, keys } => {
+                        let n = keys.len();
+                        let tx = task_tx.clone();
+                        let client = s3_client.client.clone();
+                        tokio::spawn(async move {
+                            let result = match S3Client::from_client(client, "")
+                                .delete_objects(&bucket, &keys)
+                                .await
+                            {
+                                Ok(deleted) => Ok(deleted),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = tx.send(TaskMessage::ObjectsDeleted { result });
+                        });
+                        state.cancel_input();
+                        state.clear_selection();
+                        state.loading_state =
+                            LoadingState::Loading(format!("Deleting {n} object(s)..."));
+                    }
+                    _ => {}
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -480,28 +534,58 @@ async fn handle_input_key(
             _ => {}
         },
         InputMode::Metadata => match code {
-            KeyCode::Up | KeyCode::Char('k') => state.metadata_editor.select_prev(),
-            KeyCode::Down | KeyCode::Char('j') => state.metadata_editor.select_next(),
-            KeyCode::Backspace => {
-                state.input_buffer.pop();
+            KeyCode::Down => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
+                state.metadata_editor.move_row(1);
+            }
+            KeyCode::Up => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
+                state.metadata_editor.move_row(-1);
+            }
+            KeyCode::Tab => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
+                state.metadata_editor.toggle_field();
             }
             KeyCode::Enter => {
-                let line = state.input_buffer.trim().to_string();
+                state.metadata_editor.commit_cell(&state.input_buffer);
                 state.input_buffer.clear();
-                match state.metadata_editor.apply_command(&line) {
-                    Ok(()) => {
-                        let entries = state
-                            .metadata_editor
-                            .selected_file()
-                            .map(|(_, m)| m.len())
-                            .unwrap_or(0);
-                        state.status_message =
-                            format!("Metadata updated ({entries} key(s) set for this file)");
-                    }
-                    Err(e) => state.status_message = e,
+                if state.metadata_editor.field == MetadataField::Key {
+                    state.metadata_editor.field = MetadataField::Value;
+                } else {
+                    state.metadata_editor.move_row(1);
+                    state.metadata_editor.field = MetadataField::Key;
                 }
             }
-            KeyCode::Char('u') | KeyCode::Char('U') => {
+            KeyCode::Char('A') => {
+                state.metadata_editor.add_row();
+                state.input_buffer.clear();
+                state.status_message =
+                    "Editing new row - type the key, Enter, then the value".to_string();
+            }
+            KeyCode::Char('D') | KeyCode::Delete => {
+                if state.metadata_editor.delete_row() {
+                    state.input_buffer.clear();
+                    state.status_message = "Row deleted".to_string();
+                } else {
+                    state.status_message = "Nothing to delete - use A to add a row".to_string();
+                }
+            }
+            KeyCode::Char('N') | KeyCode::BackTab => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
+                state.metadata_editor.select_next();
+            }
+            KeyCode::Char('P') => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
+                state.metadata_editor.select_prev();
+            }
+            KeyCode::Char('U') => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
                 let files = state.metadata_editor.to_upload();
                 if files.is_empty() {
                     state.status_message = "No files marked for upload".to_string();
@@ -527,6 +611,9 @@ async fn handle_input_key(
                 }
             }
             KeyCode::Char(c) => state.input_buffer.push(c),
+            KeyCode::Backspace => {
+                state.input_buffer.pop();
+            }
             _ => {}
         },
         InputMode::Directory => match code {
@@ -777,8 +864,9 @@ mod picker_flow_smoke {
             "space marks two files"
         );
 
-        // 'u' now opens the metadata editor; add metadata to the first file,
-        // then upload with 'u'.
+        // 'u' now opens the metadata editor; build one entry with the table
+        // keys (A → add row, type into key, Enter, type into value, Enter),
+        // then upload with uppercase 'U'.
         handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
         assert_eq!(
             state.input_mode,
@@ -786,7 +874,15 @@ mod picker_flow_smoke {
             "u enters the metadata editor"
         );
         assert_eq!(state.metadata_editor.len(), 2, "both marked files listed");
-        state.input_buffer = "env=prod".to_string();
+
+        handle_input_key(&mut state, KeyCode::Char('A'), &s3_client, &task_tx).await;
+        for c in "env".chars() {
+            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+        }
+        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        for c in "prod".chars() {
+            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+        }
         handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
         assert_eq!(
             state.metadata_editor.selected_file().unwrap().1,
@@ -794,7 +890,7 @@ mod picker_flow_smoke {
             "metadata captured per file"
         );
 
-        handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
+        handle_input_key(&mut state, KeyCode::Char('U'), &s3_client, &task_tx).await;
         assert_eq!(
             state.input_mode,
             InputMode::None,
@@ -847,5 +943,120 @@ mod picker_flow_smoke {
             "FLOW OK: {report:?} meta.env={meta} info.metadata={:?}",
             detail.metadata
         );
+    }
+
+    #[tokio::test]
+    async fn select_all_and_batch_delete() {
+        if std::env::var("S3_REGRESSION").as_deref() != Ok("1") {
+            eprintln!("skipping (set S3_REGRESSION=1 to run)");
+            return;
+        }
+        let s3_client = S3Client::new(
+            "us-east-1",
+            Some("http://pi:4566"),
+            None,
+            true,
+            Some(&StaticCredentials {
+                access_key_id: Some("test".to_string()),
+                secret_access_key: Some("test".to_string()),
+                session_token: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let bucket = "sm-multidel-flow";
+        if s3_client
+            .client
+            .head_bucket()
+            .bucket(bucket)
+            .send()
+            .await
+            .is_err()
+        {
+            s3_client
+                .client
+                .create_bucket()
+                .bucket(bucket)
+                .send()
+                .await
+                .ok();
+        }
+        for key in ["alpha.txt", "beta.txt", "gamma.txt"] {
+            s3_client
+                .client
+                .put_object()
+                .bucket(bucket)
+                .key(key)
+                .body(aws_sdk_s3::primitives::ByteStream::from_static(
+                    key.as_bytes(),
+                ))
+                .send()
+                .await
+                .expect("seed object");
+        }
+        // Load the seeded list into the app state, as loading a bucket would.
+        let seeded = s3_client
+            .list_objects(bucket, "")
+            .await
+            .expect("objects listed");
+
+        let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+        let mut state = AppState::new("us-east-1".to_string());
+        state.current_panel = Panel::Objects;
+        state.current_bucket = Some(bucket.to_string());
+        state.input_mode = InputMode::None;
+        state.objects = seeded;
+
+        // Mark every visible object and delete the whole selection.
+        handle_key(&mut state, KeyCode::Char('a'), &s3_client, &task_tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.selected_keys.len(),
+            3,
+            "select-all marks every object"
+        );
+        handle_key(&mut state, KeyCode::Char('d'), &s3_client, &task_tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.input_mode,
+            InputMode::Confirm,
+            "d with a non-empty selection opens confirm"
+        );
+        handle_key(&mut state, KeyCode::Char('y'), &s3_client, &task_tx)
+            .await
+            .unwrap();
+        assert_eq!(state.input_mode, InputMode::None, "confirm closes");
+        assert!(state.selected_keys.is_empty(), "selection cleared");
+
+        let mut deleted = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while deleted.is_none() && std::time::Instant::now() < deadline {
+            if let Ok(TaskMessage::ObjectsDeleted { result }) = task_rx.try_recv() {
+                deleted = Some(result);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let deleted = deleted
+            .expect("delete task reported back")
+            .unwrap_or_else(|e| panic!("batch delete failed: {e}"));
+        assert_eq!(deleted.len(), 3, "all three objects deleted");
+
+        let listed = s3_client
+            .list_objects(bucket, "")
+            .await
+            .expect("objects listed after delete");
+        let remaining: Vec<&str> = listed
+            .iter()
+            .filter(|o| !o.is_folder)
+            .map(|o| o.key.as_str())
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "bucket empty after batch delete: {remaining:?}"
+        );
+        eprintln!("MULTI-DELETE OK: removed {deleted:?}");
     }
 }

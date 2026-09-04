@@ -117,12 +117,22 @@ pub struct UploadReport {
     pub failures: Vec<(String, String)>,
 }
 
-/// Per-file upload metadata editor: one list of `key=value` pairs per marked
-/// local file, gathered right before the batch upload runs.
+/// Which cell of a metadata row is being edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataField {
+    #[default]
+    Key,
+    Value,
+}
+
+/// Per-file upload metadata editor: each marked file owns a small table of
+/// `key`/`value` rows that is edited cell by cell before the upload runs.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataEditor {
     pub files: Vec<(PathBuf, Vec<(String, String)>)>,
     pub selected: usize,
+    pub row: usize,
+    pub field: MetadataField,
 }
 
 impl MetadataEditor {
@@ -130,6 +140,8 @@ impl MetadataEditor {
         Self {
             files: paths.into_iter().map(|p| (p, Vec::new())).collect(),
             selected: 0,
+            row: 0,
+            field: MetadataField::Key,
         }
     }
 
@@ -145,60 +157,101 @@ impl MetadataEditor {
         self.files.get(self.selected)
     }
 
+    pub fn entries_len(&self) -> usize {
+        self.files
+            .get(self.selected)
+            .map(|(_, e)| e.len())
+            .unwrap_or(0)
+    }
+
+    /// Switch to the next/previous marked file and reset the cell cursor.
     pub fn select_next(&mut self) {
         if self.selected + 1 < self.files.len() {
             self.selected += 1;
         }
+        self.row = 0;
+        self.field = MetadataField::Key;
     }
 
     pub fn select_prev(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
         }
+        self.row = 0;
+        self.field = MetadataField::Key;
     }
 
-    /// Parse a command line for the selected file: `key=value` sets/overwrites
-    /// a metadata entry, `-key` removes it. Returns the human message to show.
-    pub fn apply_command(&mut self, line: &str) -> Result<(), String> {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix('-') {
-            let key = rest.trim();
-            if key.is_empty() {
-                return Err("expected -key to remove a metadata entry".to_string());
-            }
-            if let Some(file) = self.files.get_mut(self.selected) {
-                let before = file.1.len();
-                file.1.retain(|(k, _)| k != key);
-                if file.1.len() == before {
-                    return Err(format!("no metadata key '{key}' to remove"));
-                }
-            }
-            return Ok(());
+    /// Write `buffer` into the active cell of the current row. An empty buffer
+    /// means "no pending edit" and leaves the cell untouched.
+    pub fn commit_cell(&mut self, buffer: &str) {
+        if buffer.is_empty() {
+            return;
         }
-        let Some(eq) = line.find('=') else {
-            return Err("expected key=value (or -key to remove)".to_string());
+        if let Some((_, entries)) = self.files.get_mut(self.selected)
+            && self.row < entries.len()
+        {
+            let value = buffer.to_string();
+            match self.field {
+                MetadataField::Key => entries[self.row].0 = value,
+                MetadataField::Value => entries[self.row].1 = value,
+            }
+        }
+    }
+
+    pub fn toggle_field(&mut self) {
+        self.field = match self.field {
+            MetadataField::Key => MetadataField::Value,
+            MetadataField::Value => MetadataField::Key,
         };
-        let key = line[..eq].trim().to_string();
-        let value = line[eq + 1..].trim().to_string();
-        if key.is_empty() {
-            return Err("metadata key cannot be empty".to_string());
-        }
-        if value.is_empty() {
-            return Err("metadata value cannot be empty".to_string());
-        }
-        if let Some(file) = self.files.get_mut(self.selected) {
-            if let Some((_, v)) = file.1.iter_mut().find(|(k, _)| *k == key) {
-                *v = value;
-            } else {
-                file.1.push((key, value));
-            }
-        }
-        Ok(())
     }
 
-    /// The list of (path, metadata) pairs to be handed to the uploader.
+    /// Move the row cursor by `delta` rows (clamped), keeping the active field.
+    pub fn move_row(&mut self, delta: isize) {
+        let len = self.entries_len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.row as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.row = next;
+    }
+
+    /// Insert a fresh empty row after the cursor and move onto it.
+    pub fn add_row(&mut self) {
+        if let Some((_, entries)) = self.files.get_mut(self.selected) {
+            let at = self.row.min(entries.len());
+            entries.insert(at, (String::new(), String::new()));
+            self.row = at;
+            self.field = MetadataField::Key;
+        }
+    }
+
+    /// Remove the row under the cursor. Returns `false` when there is nothing
+    /// to remove.
+    pub fn delete_row(&mut self) -> bool {
+        let Some((_, entries)) = self.files.get_mut(self.selected) else {
+            return false;
+        };
+        if self.row >= entries.len() {
+            return false;
+        }
+        entries.remove(self.row);
+        if self.row >= entries.len() && !entries.is_empty() {
+            self.row = entries.len() - 1;
+        }
+        self.field = MetadataField::Key;
+        true
+    }
+
+    /// The list of (path, metadata) pairs to hand to the uploader. Rows with
+    /// an empty key are skipped (they would make S3 reject the request).
     pub fn to_upload(&self) -> Vec<(PathBuf, Vec<(String, String)>)> {
-        self.files.clone()
+        self.files
+            .iter()
+            .map(|(p, e)| {
+                let kept = e.iter().filter(|(k, _)| !k.is_empty()).cloned().collect();
+                (p.clone(), kept)
+            })
+            .collect()
     }
 }
 
@@ -206,6 +259,7 @@ impl MetadataEditor {
 pub enum PendingAction {
     None,
     DeleteObject { bucket: String, key: String },
+    DeleteMany { bucket: String, keys: Vec<String> },
     Download { bucket: String, key: String },
     DownloadMany { bucket: String, keys: Vec<String> },
 }
@@ -226,6 +280,9 @@ pub enum TaskMessage {
     },
     ObjectDeleted {
         result: Result<String, String>,
+    },
+    ObjectsDeleted {
+        result: Result<Vec<String>, String>,
     },
     ObjectDetailLoaded(Result<ObjectDetail, String>),
     ObjectsDownloaded {

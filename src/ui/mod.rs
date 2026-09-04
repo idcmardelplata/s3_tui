@@ -11,7 +11,7 @@ use ratatui::{
     },
 };
 
-use crate::app::{AppState, InputMode, LoadingState, Panel, StorageClass};
+use crate::app::{AppState, InputMode, LoadingState, MetadataField, Panel, StorageClass};
 
 use theme::{Theme, base, folder_color, panel_border, panel_title, selected_row};
 
@@ -773,79 +773,146 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         .unwrap_or_default();
 
     {
-        let items: Vec<ListItem> = editor
-            .files
-            .iter()
-            .enumerate()
-            .map(|(pos, (path, entries))| {
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                let meta = if entries.is_empty() {
-                    "-".to_string()
+        let entries = &editor.files.get(editor.selected).map(|(_, e)| e).cloned();
+        let entries = entries.as_deref().unwrap_or_default();
+        let is_cursor_key = editor.field == MetadataField::Key;
+        let is_cursor_value = editor.field == MetadataField::Value;
+
+        let header = Line::from(Span::styled(
+            "  #  KEY                     VALUE",
+            Style::default()
+                .fg(theme.text_dim)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        let mut rows: Vec<ListItem> = Vec::with_capacity(entries.len() + 1);
+        rows.push(ListItem::new(header));
+        if entries.is_empty() {
+            rows.push(ListItem::new(Line::from(Span::styled(
+                "  No metadata rows yet — press A to add one",
+                Style::default().fg(theme.text_dim),
+            ))));
+        }
+        for (i, (k, v)) in entries.iter().enumerate() {
+            let is_cursor = i == editor.row;
+            let (key_text, value_text) = if is_cursor {
+                let buf = state.input_buffer.as_str();
+                if is_cursor_key {
+                    (buf, v.as_str())
                 } else {
-                    entries
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                };
-                let is_selected = pos == editor.selected;
-                let base = if is_selected {
-                    Style::default().fg(theme.accent)
+                    (k.as_str(), buf)
+                }
+            } else {
+                (k.as_str(), v.as_str())
+            };
+
+            let key_span = if is_cursor && is_cursor_key {
+                let display = if key_text.is_empty() {
+                    "(empty)".to_string()
                 } else {
-                    Style::default().fg(theme.text)
+                    format!("{key_text:<22}", key_text = truncate(key_text, 22))
                 };
-                let style = if is_selected {
-                    base.add_modifier(Modifier::BOLD)
+                Span::styled(
+                    display,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                )
+            } else if key_text.is_empty() {
+                Span::styled("·".to_string(), Style::default().fg(theme.text_dim))
+            } else {
+                Span::styled(
+                    format!("{key_text:<22}", key_text = truncate(key_text, 22)),
+                    Style::default().fg(theme.text),
+                )
+            };
+
+            let value_span = if is_cursor && is_cursor_value {
+                let display = if value_text.is_empty() {
+                    "(empty)".to_string()
                 } else {
-                    base
+                    value_text.to_string()
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(if is_selected { "▸ " } else { "  " }, style),
-                    Span::styled(name, style),
-                    Span::styled(format!("  {meta}"), Style::default().fg(theme.text_dim)),
-                ]))
-            })
-            .collect();
+                Span::styled(
+                    format!("{display:>24}"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                )
+            } else if value_text.is_empty() {
+                Span::styled(format!("{:>24}", "·"), Style::default().fg(theme.text_dim))
+            } else {
+                Span::styled(
+                    format!("{:>24}", truncate(value_text, 24)),
+                    Style::default().fg(theme.text),
+                )
+            };
+
+            let number = Span::styled(
+                format!("{:>2} ", i + 1),
+                Style::default().fg(if is_cursor {
+                    theme.accent
+                } else {
+                    theme.text_dim
+                }),
+            );
+            let row_style = if is_cursor {
+                selected_row(theme)
+            } else {
+                Style::default()
+            };
+            let marker = Span::styled(
+                if is_cursor { "▸" } else { " " },
+                if is_cursor {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text_dim)
+                },
+            );
+            rows.push(
+                ListItem::new(Line::from(vec![marker, number, key_span, value_span]))
+                    .style(row_style),
+            );
+        }
 
         let block = Block::default()
             .title(Line::from(Span::styled(
-                centered_title(format!(
-                    " Metadata for {} file(s) — editing: {selected_name} ",
-                    editor.len()
-                )),
+                centered_title(format!(" Upload metadata — {selected_name} ",)),
                 panel_title(theme),
-            )))
-            .title_bottom(Line::from(Span::styled(
-                " entries are added with 'key=value' below; '-key' removes one",
-                Style::default().fg(theme.text_dim),
             )))
             .borders(Borders::ALL)
             .border_style(panel_border(theme, true))
             .padding(Padding::horizontal(1));
 
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(selected_row(theme));
-
-        let mut list_state = ratatui::widgets::ListState::default();
-        if !editor.files.is_empty() {
-            list_state.select(Some(editor.selected.min(editor.files.len() - 1)));
-        }
-        frame.render_stateful_widget(list, chunks[0], &mut list_state);
+        let list = List::new(rows).block(block);
+        frame.render_widget(list, chunks[0]);
     }
 
-    let input_text = if state.input_buffer.is_empty() {
-        " key=value and Enter to add · -key and Enter to remove".to_string()
+    let field_name = match state.metadata_editor.field {
+        MetadataField::Key => "KEY",
+        MetadataField::Value => "VALUE",
+    };
+    let buffer_text = if state.input_buffer.is_empty() {
+        format!(
+            " file {}/{} · {} entry(ies) · editing {field_name}",
+            editor.selected + 1,
+            editor.len(),
+            editor.entries_len()
+        )
     } else {
-        format!(" >{}", state.input_buffer)
+        format!(
+            " file {}/{} · {} entry(ies) · editing {field_name} · `{}`",
+            editor.selected + 1,
+            editor.len(),
+            editor.entries_len(),
+            state.input_buffer
+        )
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            input_text,
+            buffer_text,
             Style::default().fg(theme.info),
         )))
         .block(Block::default().borders(Borders::NONE)),
@@ -854,7 +921,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ↑↓:file · Enter:add/remove entry · u:upload now · Esc:back ",
+            " ↑↓:row · Tab:key↔value · Enter:ok · A:add row · D:delete row · N/P:file · U:upload now · Esc:back ",
             Style::default().fg(theme.text_dim),
         )))
         .block(Block::default().borders(Borders::NONE)),
@@ -896,11 +963,11 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
 
     // A short descriptive line above the field.
     let helper = match state.input_mode {
-        InputMode::Confirm => "Deleting this object cannot be undone. Type y to confirm.",
+        InputMode::Confirm => "Deleting cannot be undone. Type y to confirm.",
         InputMode::Directory => "Enter the destination directory for the download.",
         InputMode::Filter => "Type to filter objects. Enter applies it, Esc clears it.",
         InputMode::FilePicker => "Select one or more files. u opens the metadata editor.",
-        InputMode::Metadata => "Attach key=value metadata to each file, then press u.",
+        InputMode::Metadata => "Edit each file's metadata table, then press uppercase U to upload.",
         InputMode::None => "",
     };
     frame.render_widget(
@@ -1103,24 +1170,24 @@ mod tests {
     }
 
     #[test]
-    fn renders_metadata_editor_shows_files_and_entries() {
+    fn renders_metadata_editor_shows_rows_and_live_edit() {
         let mut state = sample_state();
         state.input_mode = InputMode::Metadata;
         state.metadata_editor = crate::app::MetadataEditor::from_paths(vec![
             std::path::PathBuf::from("/tmp/a.txt"),
             std::path::PathBuf::from("/tmp/b.log"),
         ]);
-        state
-            .metadata_editor
-            .apply_command("env=prod")
-            .expect("valid entry");
+        state.metadata_editor.files[0].1.extend(vec![
+            ("env".to_string(), "prod".to_string()),
+            ("app".to_string(), "demo".to_string()),
+        ]);
+        state.input_buffer = "live".to_string();
         let buffer = draw(&mut state, 60, 14);
-        assert!(locate(&buffer, "a.txt").is_some(), "file shown");
-        assert!(locate(&buffer, "b.log").is_some(), "file shown");
-        assert!(
-            locate(&buffer, "env=prod").is_some(),
-            "entry shown for selected file"
-        );
+        assert!(locate(&buffer, "a.txt").is_some(), "selected file in title");
+        assert!(locate(&buffer, "1/2").is_some(), "file counter shown");
+        assert!(locate(&buffer, "live").is_some(), "live buffer in key cell");
+        assert!(locate(&buffer, "prod").is_some(), "value of row 1 shown");
+        assert!(locate(&buffer, "demo").is_some(), "value of row 2 shown");
     }
 
     #[test]

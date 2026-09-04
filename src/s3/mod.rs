@@ -194,6 +194,49 @@ impl S3Client {
         Ok(())
     }
 
+    /// Delete several objects in a single S3 batch request. Returns the deleted
+    /// keys; any per-object error aborts with a message naming the failures.
+    pub async fn delete_objects(&self, bucket: &str, keys: &[String]) -> Result<Vec<String>> {
+        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+
+        let mut objects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let id = ObjectIdentifier::builder()
+                .key(key)
+                .build()
+                .with_context(|| format!("invalid object key {key}"))?;
+            objects.push(id);
+        }
+        let delete = Delete::builder()
+            .set_objects(Some(objects))
+            .build()
+            .with_context(|| "failed to build delete request")?;
+        let resp = self
+            .client
+            .delete_objects()
+            .bucket(bucket)
+            .delete(delete)
+            .send()
+            .await
+            .with_context(|| format!("failed batch delete in s3://{bucket}/"))?;
+        let errors = resp.errors();
+        if !errors.is_empty() {
+            let msg = errors
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}: {}",
+                        e.key().unwrap_or("?"),
+                        e.message().unwrap_or("unknown error")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(anyhow::anyhow!("batch delete failed: {msg}"));
+        }
+        Ok(keys.to_vec())
+    }
+
     pub async fn upload_file(
         &self,
         bucket: &str,
