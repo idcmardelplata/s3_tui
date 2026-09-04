@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod errors;
 mod s3;
 mod ui;
@@ -12,12 +13,12 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
-const DEFAULT_ENDPOINT: &str = "http://pi:4566";
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
-    let endpoint = std::env::var("S3_ENDPOINT").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
+    let _ = config::ensure_default_config();
+    let config = config::load().unwrap_or_default();
+    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| config.effective_region());
+    let endpoint = std::env::var("S3_ENDPOINT").unwrap_or_else(|_| config.effective_endpoint());
 
     let mut terminal = ratatui::init();
     let result = run_app(&mut terminal, &region, &endpoint).await;

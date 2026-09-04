@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 
+use crate::ui::theme::{Theme, resolve};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Panel {
     Buckets,
@@ -156,6 +158,8 @@ pub struct AppState {
     pub selected_object_detail: Option<ObjectDetail>,
     /// Keys of objects currently multi-selected for batch operations.
     pub selected_keys: HashSet<String>,
+    /// The active `ratatui-themekit` palette, resolved once at startup.
+    pub theme: Theme,
 }
 
 impl AppState {
@@ -178,6 +182,7 @@ impl AppState {
             filter: String::new(),
             selected_object_detail: None,
             selected_keys: HashSet::new(),
+            theme: resolve(),
         }
     }
 

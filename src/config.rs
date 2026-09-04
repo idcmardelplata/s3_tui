@@ -23,6 +23,17 @@ pub struct AwsConfig {
     /// Static credentials. When omitted, the standard AWS credential chain is
     /// used (env, `~/.aws/credentials`, profiles, etc.).
     pub credentials: Option<StaticCredentials>,
+    /// UI preferences.
+    pub ui: Option<UiConfig>,
+}
+
+/// UI preferences.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// `ratatui-themekit` theme ID (e.g. `"catppuccin"`, `"dracula"`).
+    /// Overridable via `S3TUI_THEME`; `NO_COLOR` disables colours entirely.
+    pub theme: Option<String>,
 }
 
 /// Static credentials for the S3 client.
@@ -50,6 +61,12 @@ impl AwsConfig {
             .or_else(|| self.endpoint.clone())
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
     }
+
+    /// Theme ID from the config file (`[ui] theme`), if set. Environment
+    /// variables take precedence and are handled by the theme module.
+    pub fn effective_theme(&self) -> Option<String> {
+        self.ui.as_ref().and_then(|ui| ui.theme.clone())
+    }
 }
 
 /// Default TOML written on first run: LocalStack-compatible defaults.
@@ -57,6 +74,12 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# s3-tui configuration
 region = "us-east-1"
 endpoint = "http://pi:4566"
 force_path_style = true
+
+[ui]
+# Theme ID (built-ins: catppuccin, dracula, gruvbox, nord, one-dark, solarized,
+# tailwind, tokyo-night, rose-pine, terminal). Override at runtime with
+# S3TUI_THEME; NO_COLOR disables colours entirely.
+theme = "catppuccin"
 
 [credentials]
 access_key_id = "test"
@@ -116,6 +139,9 @@ region = "us-east-1"
 endpoint = "http://pi:4566"
 force_path_style = true
 
+[ui]
+theme = "dracula"
+
 [credentials]
 access_key_id = "test"
 secret_access_key = "secret"
@@ -126,6 +152,9 @@ session_token = "token"
         assert_eq!(cfg.endpoint.as_deref(), Some("http://pi:4566"));
         assert_eq!(cfg.force_path_style, Some(true));
         assert_eq!(cfg.profile, None);
+        let ui = cfg.ui.as_ref().unwrap();
+        assert_eq!(ui.theme.as_deref(), Some("dracula"));
+        assert_eq!(cfg.effective_theme().as_deref(), Some("dracula"));
         let cred = cfg.credentials.unwrap();
         assert_eq!(cred.access_key_id.as_deref(), Some("test"));
         assert_eq!(cred.secret_access_key.as_deref(), Some("secret"));
@@ -151,6 +180,11 @@ session_token = "token"
         assert_eq!(cfg.region.as_deref(), Some("us-east-1"));
         assert_eq!(cfg.endpoint.as_deref(), Some("http://pi:4566"));
         assert_eq!(cfg.force_path_style, Some(true));
+        assert_eq!(
+            cfg.effective_theme().as_deref(),
+            Some("catppuccin"),
+            "default config ships with a theme"
+        );
         let cred = cfg.credentials.expect("default config has credentials");
         assert_eq!(cred.access_key_id.as_deref(), Some("test"));
         assert_eq!(cred.secret_access_key.as_deref(), Some("test"));

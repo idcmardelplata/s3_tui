@@ -1,9 +1,9 @@
-mod theme;
+pub mod theme;
 
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Padding, Paragraph, Row, Scrollbar,
@@ -13,7 +13,7 @@ use ratatui::{
 
 use crate::app::{AppState, InputMode, LoadingState, Panel, StorageClass};
 
-use theme::{Theme, panel_border};
+use theme::{Theme, base, folder_color, panel_border, panel_title, selected_row};
 
 /// The set of columns rendered in the objects table and their relative widths.
 const OBJ_SEL_W: u16 = 4;
@@ -22,19 +22,20 @@ const OBJ_SIZE_W: u16 = 12;
 const OBJ_STORAGE_W: u16 = 22;
 const OBJ_DATE_W: u16 = 17;
 
-fn storage_class_color(theme: &Theme, sc: &StorageClass) -> Color {
+fn storage_class_color(theme: &Theme, sc: &StorageClass) -> Style {
     match sc {
-        StorageClass::Folder => theme.folder,
+        StorageClass::Folder => folder_color(theme),
         StorageClass::Standard => theme.success,
-        StorageClass::IntelligentTiering => Color::Cyan,
+        StorageClass::IntelligentTiering => theme.accent,
         StorageClass::Glacier | StorageClass::GlacierIr | StorageClass::DeepArchive => {
-            Color::Magenta
+            theme.accent_dim
         }
         StorageClass::StandardIa | StorageClass::OneZoneIa | StorageClass::ReducedRedundancy => {
             theme.warning
         }
-        _ => theme.muted,
+        _ => theme.text_dim,
     }
+    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,9 @@ fn centered_title(title: impl Into<String>) -> String {
 }
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
-    let theme = Theme::dark();
+    let theme = state.theme;
+
+    frame.render_widget(Block::default().style(base(&theme)), frame.area());
 
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
@@ -86,7 +89,7 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         .map(|(i, bucket)| {
             let is_selected = active && i == state.selected_index;
             let mut style = if is_selected {
-                Style::default().fg(theme.highlight)
+                Style::default().fg(theme.accent)
             } else if state.current_bucket.as_deref() == Some(&bucket.name) {
                 Style::default().fg(theme.success)
             } else {
@@ -110,10 +113,10 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
 
             ListItem::new(Line::from(vec![
                 Span::styled(format!("  {} ", bucket.name), style),
-                Span::styled(date_str, Style::default().fg(theme.muted)),
+                Span::styled(date_str, Style::default().fg(theme.text_dim)),
                 Span::styled(
                     format!(" {num_objects:>6} "),
-                    Style::default().fg(theme.muted),
+                    Style::default().fg(theme.text_dim),
                 ),
             ]))
         })
@@ -122,7 +125,7 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     let block = Block::default()
         .title(Line::from(Span::styled(
             centered_title("Buckets"),
-            theme.panel_title(),
+            panel_title(theme),
         )))
         .title_bottom(Line::from(Span::styled(
             if active {
@@ -130,7 +133,7 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
             } else {
                 ""
             },
-            Style::default().fg(theme.muted),
+            Style::default().fg(theme.text_dim),
         )))
         .borders(Borders::ALL)
         .border_style(panel_border(theme, active))
@@ -138,7 +141,7 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(theme.selected_row());
+        .highlight_style(selected_row(theme));
 
     let mut list_state = ListState::default();
     if active {
@@ -166,7 +169,7 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, index: usize, total: usize, t
         .end_symbol(Some(" "))
         .track_symbol(Some(" "))
         .thumb_symbol(" ")
-        .style(Style::default().fg(theme.muted_border))
+        .style(Style::default().fg(theme.border))
         .thumb_style(Style::default().fg(theme.accent));
 
     let mut scroll_area = area;
@@ -193,12 +196,12 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     let visible_total = visible.len();
 
     // ---- Build the table header -------------------------------------------
-    let sel_hdr = Span::styled("Sel", theme.panel_title());
-    let icon_hdr = Span::styled("", theme.panel_title());
-    let name_hdr = Span::styled("Name", theme.panel_title());
-    let size_hdr = Span::styled("Size", theme.panel_title());
-    let storage_hdr = Span::styled("Storage", theme.panel_title());
-    let date_hdr = Span::styled("Modified", theme.panel_title());
+    let sel_hdr = Span::styled("Sel", panel_title(theme));
+    let icon_hdr = Span::styled("", panel_title(theme));
+    let name_hdr = Span::styled("Name", panel_title(theme));
+    let size_hdr = Span::styled("Size", panel_title(theme));
+    let storage_hdr = Span::styled("Storage", panel_title(theme));
+    let date_hdr = Span::styled("Modified", panel_title(theme));
     let header = Row::new(vec![
         sel_hdr,
         icon_hdr,
@@ -207,7 +210,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         storage_hdr,
         date_hdr,
     ])
-    .style(Style::default().bg(Color::DarkGray));
+    .style(theme.surface);
 
     // ---- Build rows --------------------------------------------------------
     let rows: Vec<Row> = visible
@@ -218,7 +221,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
             let is_selected = active && pos == state.selected_index;
             let is_marked = state.selected_keys.contains(&obj.key);
             let base = if obj.is_folder {
-                Style::default().fg(theme.folder)
+                Style::default().fg(folder_color(theme))
             } else {
                 Style::default().fg(theme.text)
             };
@@ -250,7 +253,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
             } else {
                 obj.storage_class.to_string()
             };
-            let sc_style = Style::default().fg(storage_class_color(theme, &obj.storage_class));
+            let sc_style = storage_class_color(theme, &obj.storage_class);
             let sc = truncate(&sc, OBJ_STORAGE_W as usize - 1);
 
             let checkbox = if obj.is_folder {
@@ -265,16 +268,16 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
                     .fg(theme.success)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.muted)
+                Style::default().fg(theme.text_dim)
             };
 
             Row::new(vec![
                 Cell::from(Span::styled(format!("[{checkbox}]"), checkbox_style)),
                 Cell::from(Span::styled(format!(" {icon} "), style)),
                 Cell::from(Span::styled(name.to_string(), style)),
-                Cell::from(Span::styled(size, Style::default().fg(theme.muted))),
+                Cell::from(Span::styled(size, Style::default().fg(theme.text_dim))),
                 Cell::from(Span::styled(sc, sc_style)),
-                Cell::from(Span::styled(date, Style::default().fg(theme.muted))),
+                Cell::from(Span::styled(date, Style::default().fg(theme.text_dim))),
             ])
         })
         .collect();
@@ -288,7 +291,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     if !state.filter.is_empty() {
         title = format!("{title}  [filter: '{}']", state.filter);
     }
-    let title_span = Span::styled(centered_title(&title), theme.panel_title());
+    let title_span = Span::styled(centered_title(&title), panel_title(theme));
 
     let metrics = if state.selected_keys.is_empty() {
         format!("{}/{} shown", visible_total, state.objects.len())
@@ -300,7 +303,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
             state.objects.len()
         )
     };
-    let bottom_span = Span::styled(metrics, Style::default().fg(theme.muted));
+    let bottom_span = Span::styled(metrics, Style::default().fg(theme.text_dim));
 
     let block = Block::default()
         .title(Line::from(title_span))
@@ -321,7 +324,7 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .row_highlight_style(theme.selected_row());
+        .row_highlight_style(selected_row(theme));
 
     let mut table_state = TableState::default();
     if active {
@@ -355,7 +358,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
     let block = Block::default()
         .title(Line::from(Span::styled(
             centered_title("Object info"),
-            theme.panel_title(),
+            panel_title(theme),
         )))
         .borders(Borders::ALL)
         .border_style(panel_border(theme, true))
@@ -364,7 +367,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
     let lines: Vec<Line> = match detail {
         None => vec![Line::from(Span::styled(
             "No object selected / loading...",
-            Style::default().fg(theme.muted),
+            Style::default().fg(theme.text_dim),
         ))],
         Some(d) => {
             let size_label = d.size.map(|s| bytesize::ByteSize(s).to_string());
@@ -405,9 +408,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
                     Span::styled("StorageClass:  ", label_style(theme)),
                     Span::styled(
                         d.storage_class.to_string(),
-                        value_style(theme).patch(
-                            Style::default().fg(storage_class_color(theme, &d.storage_class)),
-                        ),
+                        value_style(theme).patch(storage_class_color(theme, &d.storage_class)),
                     ),
                 ]),
                 Line::from(vec![
@@ -427,7 +428,7 @@ fn render_object_detail(frame: &mut Frame, state: &mut AppState, theme: &Theme, 
                 Line::from(""),
                 Line::from(Span::styled(
                     "Press i or Esc to go back",
-                    Style::default().fg(theme.muted),
+                    Style::default().fg(theme.text_dim),
                 )),
             ]
         }
@@ -457,7 +458,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect
             Style::default().fg(if buckets_active {
                 theme.accent
             } else {
-                theme.muted
+                theme.text_dim
             }),
         )),
         Line::from(Span::styled(
@@ -465,7 +466,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect
             Style::default().fg(if objects_active {
                 theme.accent
             } else {
-                theme.muted
+                theme.text_dim
             }),
         )),
     ];
@@ -475,7 +476,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect
             _ => 1,
         })
         .divider("")
-        .style(Style::default().fg(theme.muted))
+        .style(Style::default().fg(theme.text_dim))
         .highlight_style(
             Style::default()
                 .fg(theme.accent)
@@ -510,7 +511,7 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
             format!(" {}", state.status_message),
             Style::default().fg(status_style),
         ),
-        Span::styled(loading_text, Style::default().fg(theme.muted)),
+        Span::styled(loading_text, Style::default().fg(theme.text_dim)),
     ]))
     .block(Block::default().borders(Borders::NONE))
     .wrap(Wrap { trim: false });
@@ -533,7 +534,7 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
     for (k, v) in help_keys {
         line.push(Span::styled(
             format!(" {k}:{v} "),
-            Style::default().fg(theme.muted),
+            Style::default().fg(theme.text_dim),
         ));
     }
 
@@ -553,11 +554,11 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     frame.render_widget(Clear, popup);
 
     let (title, border_color) = match state.input_mode {
-        InputMode::Confirm => (" Confirm (y/n) ", Color::Red),
-        InputMode::Path => (" Enter local file path to upload ", Color::Yellow),
-        InputMode::Directory => (" Enter destination directory ", Color::Yellow),
-        InputMode::Filter => (" Filter objects (type to search) ", Color::Cyan),
-        InputMode::None => (" Input ", Color::Gray),
+        InputMode::Confirm => (" Confirm (y/n) ", theme.error),
+        InputMode::Path => (" Enter local file path to upload ", theme.info),
+        InputMode::Directory => (" Enter destination directory ", theme.warning),
+        InputMode::Filter => (" Filter objects (type to search) ", theme.accent),
+        InputMode::None => (" Input ", theme.text_dim),
     };
 
     // Popup inner area to give breathing room around the input.
@@ -583,7 +584,7 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {helper}"),
-            Style::default().fg(theme.muted),
+            Style::default().fg(theme.text_dim),
         ))),
         inner[0],
     );
@@ -618,7 +619,8 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
                 .add_modifier(Modifier::BOLD),
         )))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(theme.surface));
     frame.render_widget(popup_block, popup);
 }
 
@@ -658,5 +660,126 @@ fn truncate(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('\u{2026}');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppState, BucketInfo, ObjectInfo};
+    use crate::ui::theme;
+    use chrono::TimeZone;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    /// Render a view into a `TestBackend` and return the frame's buffer.
+    fn draw(state: &mut AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, state))
+            .expect("render must not panic");
+        terminal.backend().buffer().clone()
+    }
+
+    /// Rebuild each terminal row into a string and search it for `needle`,
+    /// returning the `(x, y)` coordinates of the first matching cell.
+    fn locate(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+        let area = buffer.area();
+        for y in 0..area.height {
+            let mut offsets = Vec::with_capacity(area.width as usize);
+            let mut row = String::new();
+            for x in 0..area.width {
+                offsets.push(row.len());
+                row.push_str(buffer.cell((x, y)).map_or(" ", |c| c.symbol()));
+            }
+            if let Some(byte) = row.find(needle) {
+                let x = offsets.iter().position(|&o| o == byte).unwrap_or(0) as u16;
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
+    fn fg_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> ratatui::style::Color {
+        let (x, y) = locate(buffer, needle).unwrap_or_else(|| {
+            panic!("'{needle}' not found in rendered output");
+        });
+        buffer.cell((x, y)).unwrap().fg
+    }
+
+    fn sample_state() -> AppState {
+        let mut state = AppState::new("us-east-1".to_string());
+        state.current_panel = Panel::Objects;
+        state.current_bucket = Some("demo".to_string());
+        state.buckets = vec![BucketInfo {
+            name: "demo".to_string(),
+            creation_date: Some(chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap()),
+            region: "us-east-1".to_string(),
+        }];
+        state.objects = vec![
+            ObjectInfo {
+                key: "demo/myfile.txt".to_string(),
+                size: Some(1024),
+                last_modified: None,
+                is_folder: false,
+                storage_class: StorageClass::Standard,
+            },
+            ObjectInfo {
+                key: "demo/".to_string(),
+                size: None,
+                last_modified: None,
+                is_folder: true,
+                storage_class: StorageClass::Folder,
+            },
+            ObjectInfo {
+                key: "demo/cold.log".to_string(),
+                size: Some(42),
+                last_modified: None,
+                is_folder: false,
+                storage_class: StorageClass::Glacier,
+            },
+        ];
+        state.selected_index = 0;
+        // Force a known palette so the test is independent of the environment.
+        state.theme = theme::from_id("dracula");
+        state
+    }
+
+    #[test]
+    fn renders_main_view_with_theme_canvas() {
+        let buffer = draw(&mut sample_state(), 120, 30);
+        let theme = theme::from_id("dracula");
+        assert_eq!(buffer.cell((0, 0)).unwrap().bg, theme.background);
+        assert_eq!(buffer.cell((60, 15)).unwrap().bg, theme.background);
+    }
+
+    #[test]
+    fn renders_storage_class_colors_from_theme() {
+        let buffer = draw(&mut sample_state(), 120, 30);
+        let theme = theme::from_id("dracula");
+        assert_eq!(fg_at(&buffer, "cold"), theme.text);
+        assert_eq!(
+            fg_at(&buffer, "GLACIER"),
+            theme.accent_dim,
+            "GLACIER uses accent_dim"
+        );
+    }
+
+    #[test]
+    fn renders_input_popup() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::Path;
+        state.input_buffer = "/tmp/foo.txt".to_string();
+        let buffer = draw(&mut state, 120, 30);
+        assert!(locate(&buffer, "Enter local file path").is_some());
+    }
+
+    #[test]
+    fn confirm_popup_uses_error_color() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::Confirm;
+        let theme = theme::from_id("dracula");
+        let buffer = draw(&mut state, 120, 30);
+        assert_eq!(fg_at(&buffer, "Confirm (y/n)"), theme.error);
     }
 }
