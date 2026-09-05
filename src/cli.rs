@@ -224,8 +224,7 @@ secret_access_key = "cfg-sk"
         let _guard = ENV_LOCK.lock().unwrap();
         let s = ResolvedSettings::from_parts(&cli_from(&[]), &AwsConfig::default());
         assert_eq!(s.region, "us-east-1");
-        assert_eq!(s.endpoint.as_deref(), Some("http://pi:4566"));
-        assert!(s.force_path_style);
+        assert_eq!(s.endpoint, None, "standard AWS: no endpoint by default");
     }
 
     #[test]

@@ -66,22 +66,22 @@ Config file location: `$HOME/.config/s3-tui/config.toml`
 # AWS region (override: AWS_REGION env var)
 region = "us-east-1"
 
-# S3 endpoint (override: S3_ENDPOINT env var)
-# Most useful with LocalStack / MinIO / any S3-compatible service
-endpoint = "http://pi:4566"
+# S3-compatible endpoint (override: S3_ENDPOINT env var).
+# When unset, the standard AWS regional endpoint is used.
+#endpoint = "http://localhost:4566"
 
 # Path-style URLs (bucket in path, not subdomain).
-# Defaults to true when an endpoint is set; set false for virtual-hosted-style.
-force_path_style = true
+# Only meaningful when an endpoint is set; standard AWS uses virtual-hosted style.
+#force_path_style = true
 
 # Named profile from ~/.aws/credentials (override: AWS_PROFILE env var)
-#profile = "localstack"
+#profile = "my-profile"
 
 # Static credentials (override: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars)
 # When omitted, the standard AWS credential chain is used.
 # [credentials]
-# access_key_id = "test"
-# secret_access_key = "test"
+# access_key_id = "AKIA..."
+# secret_access_key = "..."
 # session_token = ""
 
 [ui]

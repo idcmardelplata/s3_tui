@@ -3,7 +3,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// Default endpoint used when neither the config file nor `S3_ENDPOINT` are set.
-pub const DEFAULT_ENDPOINT: &str = "http://pi:4566";
+/// An empty string means "use the standard AWS regional endpoint".
+pub const DEFAULT_ENDPOINT: &str = "";
 /// Default region used when neither the config file nor `AWS_REGION` are set.
 pub const DEFAULT_REGION: &str = "us-east-1";
 
@@ -70,7 +71,8 @@ impl AwsConfig {
     }
 }
 
-/// Default TOML written on first run: LocalStack-compatible defaults.
+/// Default TOML written on first run: standard AWS defaults that use the
+/// regular regional endpoint and the standard credential chain.
 pub const DEFAULT_CONFIG_TOML: &str = r#"# s3-tui configuration
 #
 # Every value can also be given from the command line (--region, --endpoint,
@@ -78,8 +80,10 @@ pub const DEFAULT_CONFIG_TOML: &str = r#"# s3-tui configuration
 # variables (AWS_REGION, AWS_DEFAULT_REGION, S3_ENDPOINT, AWS_PROFILE,
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY). Precedence: CLI > env > config.
 region = "us-east-1"
-endpoint = "http://pi:4566"
-force_path_style = true
+
+# Uncomment for S3-compatible services (LocalStack, MinIO, etc.).
+# endpoint = "http://localhost:4566"
+# force_path_style = true
 
 [ui]
 # Theme ID (built-ins: catppuccin, dracula, gruvbox, nord, one-dark, solarized,
@@ -87,11 +91,11 @@ force_path_style = true
 # S3TUI_THEME; NO_COLOR disables colours entirely.
 theme = "catppuccin"
 
-[credentials]
-# Static credentials. When omitted, the standard AWS credential chain is used
-# (env vars, ~/.aws/credentials, IAM roles on EC2, etc.).
-access_key_id = "test"
-secret_access_key = "test"
+# Uncomment to use static credentials. When omitted, the standard AWS
+# credential chain is used (env vars, ~/.aws/credentials, IAM roles, etc.).
+# [credentials]
+# access_key_id = ""
+# secret_access_key = ""
 "#;
 
 /// Path of the application config file, honouring `$HOME`.
@@ -186,16 +190,15 @@ session_token = "token"
     fn default_config_toml_is_parseable() {
         let cfg: AwsConfig = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
         assert_eq!(cfg.region.as_deref(), Some("us-east-1"));
-        assert_eq!(cfg.endpoint.as_deref(), Some("http://pi:4566"));
-        assert_eq!(cfg.force_path_style, Some(true));
         assert_eq!(
             cfg.effective_theme().as_deref(),
             Some("catppuccin"),
             "default config ships with a theme"
         );
-        let cred = cfg.credentials.expect("default config has credentials");
-        assert_eq!(cred.access_key_id.as_deref(), Some("test"));
-        assert_eq!(cred.secret_access_key.as_deref(), Some("test"));
+        assert!(
+            cfg.credentials.is_none(),
+            "standard AWS: default config has no static credentials"
+        );
     }
 
     #[test]
@@ -217,7 +220,10 @@ session_token = "token"
 
         let cfg = load().unwrap();
         assert_eq!(cfg.region.as_deref(), Some("us-east-1"));
-        assert_eq!(cfg.endpoint.as_deref(), Some("http://pi:4566"));
+        assert!(
+            cfg.endpoint.is_none(),
+            "standard AWS: no endpoint in default config"
+        );
 
         let _ = std::fs::remove_dir_all(&home);
     }
