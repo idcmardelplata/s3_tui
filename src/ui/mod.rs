@@ -38,9 +38,6 @@ fn storage_class_color(theme: &Theme, sc: &StorageClass) -> Style {
     .into()
 }
 
-// ---------------------------------------------------------------------------
-// Move a "name" column rendered as a left-aligned cell with the storage class
-// truncated to fit its column. These helpers keep the table layout stable.
 
 fn centered_title(title: impl Into<String>) -> String {
     format!(" {} ", title.into())
@@ -516,7 +513,6 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(area);
 
-    // Status (left): status message + loading state.
     let loading_text = match &state.loading_state {
         LoadingState::Idle => String::new(),
         LoadingState::Loading(msg) => format!(" {msg}"),
@@ -540,7 +536,6 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
     .block(Block::default().borders(Borders::NONE))
     .wrap(Wrap { trim: false });
 
-    // Build help as a single row of key hints so it stays within one line.
     let help_keys: &[(&str, &str)] = &[
         ("?", "ayuda"),
         ("q", "salir"),
@@ -571,12 +566,11 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
     frame.render_widget(help, chunks[1]);
 }
 
-/// Author legend pinned at the very bottom of every screen.
 fn render_legend(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
     let _ = state;
     let legend = Paragraph::new(Line::from(vec![
         Span::styled(" s3-tui ", panel_title(theme)),
-        Span::styled("autor: ", Style::default().fg(theme.text_dim)),
+        Span::styled("by: ", Style::default().fg(theme.text_dim)),
         Span::styled(
             "@idcmardelplata",
             Style::default()
@@ -588,8 +582,6 @@ fn render_legend(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
     frame.render_widget(legend, area);
 }
 
-/// Full-screen overlay listing the current directory so one or more local
-/// files can be picked (with fuzzy filtering) and uploaded in a batch.
 fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let area = frame.area();
     let chunks = Layout::default()
@@ -707,7 +699,6 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         frame.render_stateful_widget(list, chunks[0], &mut list_state);
     }
 
-    // Filter line: shows the fuzzy query, the path and any directory error.
     let filter_text = if picker_is_loading_error(state) {
         format!(" {}", state.file_picker.hint)
     } else if state.file_picker.filter.is_empty() {
@@ -724,7 +715,6 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         chunks[1],
     );
 
-    // Key hints (second-to-last line is the path, still in the list block).
     let hints = format!(
         " {} | ↑↓:mover · Enter/→:abrir dir · Espacio:marcar/desmarcar · a:todo · c:limpiar · u:metadatos · Esc:atrás ",
         state.file_picker.dir.display()
@@ -740,8 +730,6 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     );
 }
 
-/// Full-screen overlay where the user attaches `key=value` metadata to each
-/// marked file before the batch upload starts.
 fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let area = frame.area();
 
@@ -802,7 +790,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         rows.push(ListItem::new(header));
         if entries.is_empty() {
             rows.push(ListItem::new(Line::from(Span::styled(
-                "  Todavía no hay filas de metadatos — presioná A para agregar una",
+                "  Presioná A para agregar metadatos",
                 Style::default().fg(theme.text_dim),
             ))));
         }
@@ -962,7 +950,6 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         InputMode::None => (" Entrada ", theme.text_dim),
     };
 
-    // Popup inner area to give breathing room around the input.
     let inner = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
@@ -974,10 +961,9 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         .margin(1)
         .split(popup);
 
-    // A short descriptive line above the field.
     let helper = match state.input_mode {
         InputMode::Confirm => "Esta acción no se puede deshacer. Escribí s para confirmar.",
-        InputMode::Directory => "Ingresá el directorio de destino para la descarga.",
+        InputMode::Directory => "Directorio de destino para la descarga.",
         InputMode::Filter => "Escribí para filtrar objetos. Enter aplica, Esc limpia.",
         InputMode::FilePicker => "Seleccioná archivos o carpetas. u abre el editor de metadatos.",
         InputMode::Metadata => "Editá la tabla de metadatos y presioná U (mayúscula) para subir.",
@@ -991,7 +977,6 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         inner[0],
     );
 
-    // Input field with a visible cursor for editable modes.
     let editable = matches!(state.input_mode, InputMode::Directory | InputMode::Filter);
     let field_block = Block::default()
         .borders(Borders::ALL)
@@ -1009,7 +994,6 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         frame.set_cursor_position((cursor_x.min(input_area.right().saturating_sub(2)), cursor_y));
     }
 
-    // Outer bordered popup wrapping everything.
     let popup_block = Block::default()
         .title(Line::from(Span::styled(
             format!(" {title} "),
@@ -1023,10 +1007,6 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     frame.render_widget(popup_block, popup);
 }
 
-/// Returns a rect centered in `r` with a fixed number of rows and a width that
-/// is `percent_x` of the full width. Using a fixed height (instead of a
-/// percentage of the terminal) guarantees the input field always has room to
-/// render its content.
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let height = height.min(r.height.saturating_sub(2));
     let vertical = Layout::default()
@@ -1051,7 +1031,6 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     horizontal[1]
 }
 
-/// Truncate `s` to at most `max` characters (with an ellipsis when cut).
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

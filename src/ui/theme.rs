@@ -1,35 +1,11 @@
-//! Visual theme for the whole application, sourced from [`ratatui_themekit`].
-//!
-//! Every colour used by the UI comes from a single `ratatui-themekit`
-//! `ThemeData`, so the palette stays coherent and can be swapped between the
-//! built-in themes (Catppuccin, Dracula, Nord, One Dark, Tokyo Night, ...)
-//! without touching widget code. All colours honour the `NO_COLOR` convention
-//! (see <https://no-color.org/>).
-
 use ratatui::style::{Color, Modifier, Style};
 use ratatui_themekit::{BUILTIN_THEMES, NO_COLOR, ThemeData, ThemeExt, no_color_active};
 
-/// The colour palette used across the whole app — a `ratatui-themekit` theme.
-///
-/// The individual slots are plain fields: `theme.accent`, `theme.border`,
-/// `theme.surface`, `theme.text_dim`, `theme.info`, `theme.success`, ...
-/// [`ThemeExt`] additionally provides semantic style builders such as
-/// [`ThemeExt::style_accent`] and widget bundles like
-/// [`ThemeExt::table_styles`] and [`ThemeExt::scrollbar_styles`].
 pub type Theme = ThemeData;
 
 /// Theme ID used when nothing else is configured.
 pub const DEFAULT_THEME_ID: &str = "catppuccin";
 
-/// Resolve the active theme.
-///
-/// Precedence:
-/// 1. `NO_COLOR` environment variable — colours are disabled entirely;
-/// 2. `S3TUI_THEME` environment variable;
-/// 3. `[ui] theme` key of the config file;
-/// 4. [`DEFAULT_THEME_ID`].
-///
-/// Unknown IDs fall back to [`DEFAULT_THEME_ID`] with a warning on stderr.
 #[must_use]
 pub fn resolve() -> Theme {
     if no_color_active() {
@@ -39,7 +15,6 @@ pub fn resolve() -> Theme {
     from_id(&id)
 }
 
-/// Theme ID from `S3TUI_THEME` (env) or `[ui] theme` (config), else default.
 fn effective_theme_id() -> String {
     std::env::var("S3TUI_THEME")
         .ok()
@@ -47,8 +22,6 @@ fn effective_theme_id() -> String {
         .unwrap_or_else(|| DEFAULT_THEME_ID.to_string())
 }
 
-/// Look a built-in theme up by its ID, falling back to the default. Unknown
-/// IDs print a warning on stderr.
 #[must_use]
 pub fn from_id(id: &str) -> Theme {
     BUILTIN_THEMES
@@ -64,19 +37,16 @@ pub fn from_id(id: &str) -> Theme {
         })
 }
 
-/// Border style for the active panel (the one holding the cursor).
 #[must_use]
 pub fn active_border(theme: &Theme) -> Style {
     theme.style_accent().add_modifier(Modifier::BOLD)
 }
 
-/// Border style for an inactive panel.
 #[must_use]
 pub fn inactive_border(theme: &Theme) -> Style {
     theme.style_border()
 }
 
-/// Border style for a panel; `active` is `true` when it holds the cursor.
 #[must_use]
 pub fn panel_border(theme: &Theme, active: bool) -> Style {
     if active {
@@ -86,25 +56,21 @@ pub fn panel_border(theme: &Theme, active: bool) -> Style {
     }
 }
 
-/// Style for emphasised lines: panel titles and table headers.
 #[must_use]
 pub fn panel_title(theme: &Theme) -> Style {
     theme.style_accent().add_modifier(Modifier::BOLD)
 }
 
-/// Style of the selected row in a list or table.
 #[must_use]
 pub fn selected_row(theme: &Theme) -> Style {
     theme.style_surface().add_modifier(Modifier::BOLD)
 }
 
-/// Foreground colour for folder / prefix names.
 #[must_use]
 pub fn folder_color(theme: &Theme) -> Color {
     theme.info
 }
 
-/// Background canvas painted first every frame.
 #[must_use]
 pub fn base(theme: &Theme) -> Style {
     theme.style_base()
