@@ -215,13 +215,36 @@ impl MetadataEditor {
         self.row = next;
     }
 
-    /// Insert a fresh empty row after the cursor and move onto it.
+    /// Append a fresh empty row at the end and move the cursor onto it.
     pub fn add_row(&mut self) {
         if let Some((_, entries)) = self.files.get_mut(self.selected) {
-            let at = self.row.min(entries.len());
-            entries.insert(at, (String::new(), String::new()));
-            self.row = at;
+            entries.push((String::new(), String::new()));
+            self.row = entries.len() - 1;
             self.field = MetadataField::Key;
+        }
+    }
+
+    /// True when the row under the cursor has no committed key or value.
+    pub fn cursor_row_is_empty(&self) -> bool {
+        self.files
+            .get(self.selected)
+            .and_then(|(_, entries)| entries.get(self.row))
+            .map(|(k, v)| k.is_empty() && v.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// After committing a value, move onto the next row. When the committed
+    /// row is the last one and it already holds content, a fresh empty row is
+    /// appended so several metadata can be typed in sequence.
+    pub fn advance_after_value(&mut self) {
+        self.field = MetadataField::Key;
+        if self.entries_len() == 0 {
+            return;
+        }
+        if !self.cursor_row_is_empty() && self.row == self.entries_len() - 1 {
+            self.add_row();
+        } else {
+            self.move_row(1);
         }
     }
 
@@ -548,5 +571,60 @@ impl AppState {
     /// Drop the whole multi-selection.
     pub fn clear_selection(&mut self) {
         self.selected_keys.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_editor_chains_multiple_rows() {
+        let mut ed = MetadataEditor::from_paths(vec![PathBuf::from("/tmp/a.txt")]);
+        ed.add_row();
+        assert_eq!(ed.entries_len(), 1);
+        assert!(ed.cursor_row_is_empty());
+
+        ed.commit_cell("env");
+        ed.toggle_field();
+        ed.commit_cell("prod");
+        ed.advance_after_value();
+
+        assert_eq!(ed.entries_len(), 2, "a fresh row opens after the value");
+        assert_eq!(ed.row, 1);
+        assert!(ed.cursor_row_is_empty());
+        assert_eq!(
+            ed.to_upload()[0].1,
+            vec![("env".to_string(), "prod".to_string())]
+        );
+
+        ed.commit_cell("team");
+        ed.toggle_field();
+        ed.commit_cell("infra");
+        ed.advance_after_value();
+
+        assert_eq!(ed.entries_len(), 3);
+        assert_eq!(
+            ed.to_upload()[0].1,
+            vec![
+                ("env".to_string(), "prod".to_string()),
+                ("team".to_string(), "infra".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_editor_does_not_grow_on_empty_commit() {
+        let mut ed = MetadataEditor::from_paths(vec![PathBuf::from("/tmp/a.txt")]);
+        ed.add_row();
+        ed.commit_cell("env");
+        ed.toggle_field();
+        ed.commit_cell("prod");
+        ed.advance_after_value();
+        let rows = ed.entries_len();
+
+        ed.advance_after_value();
+        assert_eq!(ed.entries_len(), rows, "empty row does not create another");
+        assert!(ed.cursor_row_is_empty());
     }
 }

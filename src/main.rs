@@ -583,8 +583,7 @@ async fn handle_input_key(
                 if state.metadata_editor.field == MetadataField::Key {
                     state.metadata_editor.field = MetadataField::Value;
                 } else {
-                    state.metadata_editor.move_row(1);
-                    state.metadata_editor.field = MetadataField::Key;
+                    state.metadata_editor.advance_after_value();
                 }
             }
             KeyCode::Char('A') => {

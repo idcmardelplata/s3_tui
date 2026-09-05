@@ -798,9 +798,9 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
             let (key_text, value_text) = if is_cursor {
                 let buf = state.input_buffer.as_str();
                 if is_cursor_key {
-                    (buf, v.as_str())
+                    (if buf.is_empty() { k.as_str() } else { buf }, v.as_str())
                 } else {
-                    (k.as_str(), buf)
+                    (k.as_str(), if buf.is_empty() { v.as_str() } else { buf })
                 }
             } else {
                 (k.as_str(), v.as_str())
@@ -1207,6 +1207,21 @@ mod tests {
         assert!(locate(&buffer, "live").is_some(), "live buffer in key cell");
         assert!(locate(&buffer, "prod").is_some(), "value of row 1 shown");
         assert!(locate(&buffer, "demo").is_some(), "value of row 2 shown");
+    }
+
+    #[test]
+    fn renders_metadata_editor_shows_committed_key_and_value_when_buffer_empty() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::Metadata;
+        state.metadata_editor =
+            crate::app::MetadataEditor::from_paths(vec![std::path::PathBuf::from("/tmp/a.txt")]);
+        state.metadata_editor.files[0]
+            .1
+            .push(("env".to_string(), "prod".to_string()));
+        state.input_buffer.clear();
+        let buffer = draw(&mut state, 60, 14);
+        assert!(locate(&buffer, "env").is_some(), "committed key shown");
+        assert!(locate(&buffer, "prod").is_some(), "committed value shown");
     }
 
     #[test]
