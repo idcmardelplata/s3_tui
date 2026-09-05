@@ -6,6 +6,8 @@ A terminal UI manager for AWS S3. Browse buckets, navigate folders, upload and d
 
 ---
 
+![screenshot](./assets/capture1.png)
+
 ## Features
 
 - **Multi-panel navigation** — buckets list, object browser, detail/preview pane.
