@@ -38,7 +38,6 @@ fn storage_class_color(theme: &Theme, sc: &StorageClass) -> Style {
     .into()
 }
 
-
 fn centered_title(title: impl Into<String>) -> String {
     format!(" {} ", title.into())
 }

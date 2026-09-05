@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod cli;
 mod config;
 mod errors;
@@ -8,12 +9,12 @@ mod ui;
 
 use anyhow::{Context, Result};
 use app::{AppState, InputMode, LoadingState, MetadataField, Panel, PendingAction, TaskMessage};
+use cache::{ObjectCache, listings_match};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use s3::S3Client;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -62,6 +63,10 @@ async fn run_app(
     let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
     let bucket_tx = task_tx.clone();
 
+    // Object cache (SQLite) — used to avoid re-fetching listings from S3.
+    ObjectCache::open_default().context("failed to open object cache (SQLite)")?;
+    let cache_path = cache::cache_db_path();
+
     // Load buckets on startup
     state.loading_state = LoadingState::Loading("Cargando buckets...".to_string());
     terminal.draw(|frame| ui::render(frame, &mut state))?;
@@ -87,14 +92,14 @@ async fn run_app(
 
         // Drain task queue
         while let Ok(message) = task_rx.try_recv() {
-            handle_task_message(&mut state, message, &s3_client, &task_tx);
+            handle_task_message(&mut state, message, &s3_client, &task_tx, &cache_path);
         }
 
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            handle_key(&mut state, key.code, &s3_client, &task_tx).await?;
+            handle_key(&mut state, key.code, &s3_client, &task_tx, &cache_path).await?;
         }
         if state.should_quit {
             break;
@@ -109,6 +114,7 @@ fn handle_task_message(
     message: TaskMessage,
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
+    cache_path: &Path,
 ) {
     match message {
         TaskMessage::BucketsLoaded(result) => match result {
@@ -183,7 +189,7 @@ fn handle_task_message(
             // Refresh the object list after a successful (or attempted) delete
             if let Some(bucket) = state.current_bucket.as_deref() {
                 let prefix = state.current_prefix.clone();
-                spawn_list_objects(s3_client, task_tx, bucket, &prefix);
+                spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
@@ -199,7 +205,7 @@ fn handle_task_message(
             state.clear_selection();
             if let Some(bucket) = state.current_bucket.as_deref() {
                 let prefix = state.current_prefix.clone();
-                spawn_list_objects(s3_client, task_tx, bucket, &prefix);
+                spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
@@ -249,9 +255,10 @@ async fn handle_key(
     code: KeyCode,
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
+    cache_path: &Path,
 ) -> Result<()> {
     if state.input_mode != InputMode::None {
-        handle_input_key(state, code, s3_client, task_tx).await;
+        handle_input_key(state, code, s3_client, task_tx, cache_path).await;
         return Ok(());
     }
 
@@ -261,22 +268,26 @@ async fn handle_key(
         }
         KeyCode::Char('?') => {
             state.status_message =
-                "Help: q:quit | u:upload(multi) | g:download | d:delete | Space:select | a:all | c:clear | Enter:open | ←:back | ↑↓:nav"
+                "Help: q:quit | u:upload(multi) | g:download | d:delete | Space:select | a:all | c:clear | r:refresh | Enter:open | ←:back | ↑↓:nav"
                     .to_string();
         }
         KeyCode::Up | KeyCode::Char('k') => state.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => state.select_next(),
         KeyCode::Enter => match state.current_panel {
             Panel::Buckets => {
-                if let Some(bucket) = state.enter_bucket() {
-                    spawn_list_objects(s3_client, task_tx, &bucket, "");
+                if let Some(bucket) = state.enter_bucket()
+                    && !prime_objects_from_cache(state, cache_path, &bucket, "")
+                {
+                    spawn_list_objects(s3_client, task_tx, cache_path, &bucket, "");
                     state.loading_state = LoadingState::Loading(format!("Cargando {bucket}..."));
                 }
             }
             Panel::Objects => {
-                if let Some(prefix) = state.enter_folder() {
-                    let bucket = state.current_bucket.clone().unwrap_or_default();
-                    spawn_list_objects(s3_client, task_tx, &bucket, &prefix);
+                if let Some(prefix) = state.enter_folder()
+                    && let Some(bucket) = state.current_bucket.clone()
+                    && !prime_objects_from_cache(state, cache_path, &bucket, &prefix)
+                {
+                    spawn_list_objects(s3_client, task_tx, cache_path, &bucket, &prefix);
                     state.loading_state = LoadingState::Loading(format!("Cargando {prefix}..."));
                 }
             }
@@ -284,7 +295,7 @@ async fn handle_key(
         },
         KeyCode::Left | KeyCode::Char('h') => {
             if let Some((bucket, prefix)) = state.go_back() {
-                spawn_list_objects(s3_client, task_tx, &bucket, &prefix);
+                spawn_list_objects(s3_client, task_tx, cache_path, &bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Cargando...".to_string());
             }
         }
@@ -345,6 +356,17 @@ async fn handle_key(
             if !state.selected_keys.is_empty() {
                 state.clear_selection();
                 state.status_message = "Selección limpiada".to_string();
+            }
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            if state.current_panel == Panel::Objects {
+                let bucket = state.current_bucket.clone();
+                if let Some(bucket) = bucket.as_deref() {
+                    let prefix = state.current_prefix.clone();
+                    spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
+                    state.loading_state =
+                        LoadingState::Loading("Sincronizando desde S3...".to_string());
+                }
             }
         }
         KeyCode::Char('d') => {
@@ -412,6 +434,7 @@ async fn handle_input_key(
     code: KeyCode,
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
+    cache_path: &Path,
 ) {
     match state.input_mode {
         InputMode::Confirm => match code {
@@ -601,7 +624,7 @@ async fn handle_input_key(
                     state.cancel_input();
                     state.loading_state =
                         LoadingState::Loading(format!("Subiendo {n} archivo(s)..."));
-                    spawn_upload_many(s3_client, task_tx, &bucket, &prefix, files);
+                    spawn_upload_many(s3_client, task_tx, cache_path, &bucket, &prefix, files);
                 } else {
                     state.status_message = "Seleccioná un bucket primero".to_string();
                 }
@@ -693,9 +716,33 @@ async fn handle_input_key(
     }
 }
 
+/// Load the cached listing of `(bucket, prefix)` straight into the panel.
+/// Returns `true` when the cache had an entry (so the caller can skip asking
+/// S3 again); `false` when a remote first-list is needed.
+fn prime_objects_from_cache(
+    state: &mut AppState,
+    cache_path: &Path,
+    bucket: &str,
+    prefix: &str,
+) -> bool {
+    if let Ok(db) = ObjectCache::open(cache_path)
+        && db.listing_exists(bucket, prefix).unwrap_or(false)
+    {
+        state.objects = db
+            .get_prefix(bucket, prefix)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        state.status_message = format!("s3://{bucket}/{prefix} - desde cache local");
+        return true;
+    }
+    false
+}
+
 fn spawn_list_objects(
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
+    cache_path: &Path,
     bucket: &str,
     prefix: &str,
 ) {
@@ -703,12 +750,30 @@ fn spawn_list_objects(
     let client = s3_client.client.clone();
     let bucket = bucket.to_string();
     let prefix = prefix.to_string();
+    let cache_path = cache_path.to_path_buf();
     tokio::spawn(async move {
         let result = match S3Client::from_client(client, "")
             .list_objects(&bucket, &prefix)
             .await
         {
-            Ok(objects) => Ok(objects),
+            Ok(remote) => {
+                // Keep the cache in sync: write the remote listing only when it
+                // differs from what we already have locally.
+                if let Ok(db) = ObjectCache::open(&cache_path) {
+                    match db.get_prefix(&bucket, &prefix) {
+                        Ok(Some(local)) => {
+                            if !listings_match(&local, &remote) {
+                                let _ = db.set_prefix(&bucket, &prefix, &remote);
+                            }
+                        }
+                        Ok(None) => {
+                            let _ = db.set_prefix(&bucket, &prefix, &remote);
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Ok(remote)
+            }
             Err(e) => Err(e.to_string()),
         };
         let _ = tx.send(TaskMessage::ObjectsLoaded {
@@ -722,6 +787,7 @@ fn spawn_list_objects(
 fn spawn_upload_many(
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
+    cache_path: &Path,
     bucket: &str,
     prefix: &str,
     files: Vec<(PathBuf, Vec<(String, String)>)>,
@@ -730,10 +796,35 @@ fn spawn_upload_many(
     let client = s3_client.client.clone();
     let bucket = bucket.to_string();
     let prefix = prefix.to_string();
+    let cache_path = cache_path.to_path_buf();
     tokio::spawn(async move {
         let report = S3Client::from_client(client, "")
             .upload_files(&bucket, &prefix, &files)
             .await;
+
+        // Register every successful upload in the object cache so the next
+        // listing shows it without hitting S3.
+        if let Ok(db) = ObjectCache::open(&cache_path) {
+            let uploaded: std::collections::HashSet<String> = report
+                .uploaded
+                .iter()
+                .filter_map(|s| s.strip_prefix(&format!("{bucket}/")))
+                .map(str::to_string)
+                .collect();
+            for (path, key_suffix, metadata) in crate::s3::expand_upload_sources(&files) {
+                let key = format!("{prefix}{key_suffix}");
+                if !uploaded.contains(&key) {
+                    continue;
+                }
+                let size = std::fs::metadata(&path).ok().map(|m| m.len()).unwrap_or(0);
+                let meta: Vec<(&str, &str)> = metadata
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let _ = db.upsert_object(&bucket, &key, size, &meta);
+            }
+        }
+
         let _ = tx.send(TaskMessage::FilesUploaded { result: Ok(report) });
     });
 }
@@ -809,12 +900,26 @@ mod picker_flow_smoke {
     use super::*;
     use crate::config::StaticCredentials;
 
+    fn temp_cache() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "s3tui-test-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        ObjectCache::open(&dir.join("cache.db")).unwrap();
+        dir.join("cache.db")
+    }
+
     #[tokio::test]
     async fn space_marks_and_u_uploads() {
         if std::env::var("S3_REGRESSION").as_deref() != Ok("1") {
             eprintln!("skipping (set S3_REGRESSION=1 to run)");
             return;
         }
+        let cache_path = temp_cache();
         let dir = std::env::temp_dir().join(format!("s3tui-flow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("one.txt"), "1").unwrap();
@@ -861,9 +966,23 @@ mod picker_flow_smoke {
 
         // one.txt is entries[1], two.txt is entries[2].
         state.file_picker.selected_index = 1;
-        handle_input_key(&mut state, KeyCode::Char(' '), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char(' '),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         state.file_picker.selected_index = 2;
-        handle_input_key(&mut state, KeyCode::Char(' '), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char(' '),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.file_picker.selection_count(),
             2,
@@ -873,7 +992,14 @@ mod picker_flow_smoke {
         // 'u' now opens the metadata editor; build one entry with the table
         // keys (A → add row, type into key, Enter, type into value, Enter),
         // then upload with uppercase 'U'.
-        handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('u'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.input_mode,
             InputMode::Metadata,
@@ -881,22 +1007,64 @@ mod picker_flow_smoke {
         );
         assert_eq!(state.metadata_editor.len(), 2, "both marked files listed");
 
-        handle_input_key(&mut state, KeyCode::Char('A'), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('A'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         for c in "env".chars() {
-            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+            handle_input_key(
+                &mut state,
+                KeyCode::Char(c),
+                &s3_client,
+                &task_tx,
+                &cache_path,
+            )
+            .await;
         }
-        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         for c in "prod".chars() {
-            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+            handle_input_key(
+                &mut state,
+                KeyCode::Char(c),
+                &s3_client,
+                &task_tx,
+                &cache_path,
+            )
+            .await;
         }
-        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.metadata_editor.selected_file().unwrap().1,
             vec![("env".to_string(), "prod".to_string())],
             "metadata captured per file"
         );
 
-        handle_input_key(&mut state, KeyCode::Char('U'), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('U'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.input_mode,
             InputMode::None,
@@ -957,6 +1125,7 @@ mod picker_flow_smoke {
             eprintln!("skipping (set S3_REGRESSION=1 to run)");
             return;
         }
+        let cache_path = temp_cache();
         let base = std::env::temp_dir().join(format!("s3tui-flow-tree-{}", std::process::id()));
         let docs = base.join("docs");
         std::fs::create_dir_all(docs.join("sub/deep")).unwrap();
@@ -1005,14 +1174,28 @@ mod picker_flow_smoke {
 
         // entries are ["..", "docs"]; mark the whole tree with Space.
         state.file_picker.selected_index = 1;
-        handle_input_key(&mut state, KeyCode::Char(' '), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char(' '),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.file_picker.selection_count(),
             1,
             "space marks the directory itself"
         );
 
-        handle_input_key(&mut state, KeyCode::Char('u'), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('u'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.input_mode,
             InputMode::Metadata,
@@ -1020,22 +1203,64 @@ mod picker_flow_smoke {
         );
         assert_eq!(state.metadata_editor.len(), 1, "single directory listed");
 
-        handle_input_key(&mut state, KeyCode::Char('A'), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('A'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         for c in "env".chars() {
-            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+            handle_input_key(
+                &mut state,
+                KeyCode::Char(c),
+                &s3_client,
+                &task_tx,
+                &cache_path,
+            )
+            .await;
         }
-        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         for c in "prod".chars() {
-            handle_input_key(&mut state, KeyCode::Char(c), &s3_client, &task_tx).await;
+            handle_input_key(
+                &mut state,
+                KeyCode::Char(c),
+                &s3_client,
+                &task_tx,
+                &cache_path,
+            )
+            .await;
         }
-        handle_input_key(&mut state, KeyCode::Enter, &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.metadata_editor.selected_file().unwrap().1,
             vec![("env".to_string(), "prod".to_string())],
             "directory metadata captured"
         );
 
-        handle_input_key(&mut state, KeyCode::Char('U'), &s3_client, &task_tx).await;
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('U'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
         assert_eq!(
             state.input_mode,
             InputMode::None,
@@ -1088,6 +1313,7 @@ mod picker_flow_smoke {
             eprintln!("skipping (set S3_REGRESSION=1 to run)");
             return;
         }
+        let cache_path = temp_cache();
         let s3_client = S3Client::new(
             "us-east-1",
             Some("http://pi:4566"),
@@ -1146,25 +1372,43 @@ mod picker_flow_smoke {
         state.objects = seeded;
 
         // Mark every visible object and delete the whole selection.
-        handle_key(&mut state, KeyCode::Char('a'), &s3_client, &task_tx)
-            .await
-            .unwrap();
+        handle_key(
+            &mut state,
+            KeyCode::Char('a'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             state.selected_keys.len(),
             3,
             "select-all marks every object"
         );
-        handle_key(&mut state, KeyCode::Char('d'), &s3_client, &task_tx)
-            .await
-            .unwrap();
+        handle_key(
+            &mut state,
+            KeyCode::Char('d'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             state.input_mode,
             InputMode::Confirm,
             "d with a non-empty selection opens confirm"
         );
-        handle_key(&mut state, KeyCode::Char('y'), &s3_client, &task_tx)
-            .await
-            .unwrap();
+        handle_key(
+            &mut state,
+            KeyCode::Char('y'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
         assert_eq!(state.input_mode, InputMode::None, "confirm closes");
         assert!(state.selected_keys.is_empty(), "selection cleared");
 
