@@ -32,9 +32,9 @@ cargo install --path .
 ### Build manually
 
 ```bash
-git clone https://github.com/idcmardelplata/s3_tui && cd s3-tui
+git clone https://github.com/idcmardelplata/s3_tui && cd s3_tui
 cargo build --release
-# binary is at ./target/release/s3-tui
+# binary is at ./target/release/s3_tui
 ```
 
 ---
@@ -43,15 +43,15 @@ cargo build --release
 
 ```bash
 # Using static credentials against a LocalStack endpoint
-s3-tui --region us-east-1 \
+s3_tui --region us-east-1 \
        --endpoint http://localhost:4566 \
        --access-key test --secret-key test
 
 # Using the standard AWS credential chain (env, ~/.aws/credentials, IAM role)
-s3-tui --region us-east-1
+s3_tui --region us-east-1
 
 # Using a named profile
-s3-tui --profile my-profile
+s3_tui --profile my-profile
 ```
 
 On first run a default config file is created at `$HOME/.config/s3-tui/config.toml`.
@@ -185,13 +185,13 @@ s3-tui [OPTIONS]
 Set via the `[ui] theme` field in the config file, or at runtime with:
 
 ```bash
-S3TUI_THEME=dracula s3-tui
+S3TUI_THEME=dracula s3_tui
 ```
 
 Disable colours entirely:
 
 ```bash
-NO_COLOR=1 s3-tui
+NO_COLOR=1 s3_tui
 ```
 
 Built-in themes: `catppuccin`, `dracula`, `gruvbox`, `nord`, `one-dark`, `solarized`, `tailwind`, `tokyo-night`, `rose-pine`, `terminal`.
@@ -201,6 +201,23 @@ Built-in themes: `catppuccin`, `dracula`, `gruvbox`, `nord`, `one-dark`, `solari
 ## SQLite cache
 
 Listings are cached in an SQLite database at `$HOME/.cache/s3-tui/cache.db`. On the first open of a folder the listing is fetched from S3; subsequent opens load from the local cache instantly. Press `r` to force a refresh from S3 — the cache is updated only when the remote listing differs. No internet connection is needed after the initial load of a folder you've already visited.
+
+---
+
+## Troubleshooting
+
+### "failed to create S3 client" or connection errors against real AWS
+
+If your `$HOME/.aws/config` contains an active AWS CLI v2 **login session**
+(a `login_session` key, e.g. `login_session = arn:aws:iam::123456789012:user/you`)
+with an expired SSO token, the SDK may abort before reaching your static
+credentials in `$HOME/.aws/credentials` (error: `Your session has expired.
+Please reauthenticate.` / `The refresh token has expired`).
+
+Fix: remove the `login_session` line from the `[default]` profile in
+`$HOME/.aws/config` (keep `region`), or run `aws sso login` again to refresh
+the session. s3-tui supports login sessions via the `credentials-login`
+feature, but an expired refresh token still needs `aws sso login`.
 
 ---
 
