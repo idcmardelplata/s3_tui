@@ -12,7 +12,7 @@ ratatui-themekit = "0.6"
 crossterm = "0.28"
 
 # AWS S3
-aws-config = { version = "1.6", features = ["behavior-version-latest"] }
+aws-config = { version = "1.6", features = ["behavior-version-latest", "credentials-login"] }
 aws-sdk-s3 = "1.63"
 
 # Async runtime
