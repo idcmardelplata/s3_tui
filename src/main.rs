@@ -127,6 +127,10 @@ fn handle_task_message(
             prefix,
             result,
         } => {
+            if state.pending_list.as_ref() != Some(&(bucket.clone(), prefix.clone())) {
+                return;
+            }
+            state.pending_list = None;
             match result {
                 Ok(objects) => {
                     state.objects = objects;
@@ -165,9 +169,9 @@ fn handle_task_message(
                 }
                 Err(e) => state.status_message = format!("Error al subir: {e}"),
             }
-            if let Some(bucket) = state.current_bucket.as_deref() {
+            if let Some(bucket) = state.current_bucket.clone() {
                 let prefix = state.current_prefix.clone();
-                spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
+                spawn_list_objects(state, s3_client, task_tx, cache_path, &bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
@@ -187,9 +191,9 @@ fn handle_task_message(
                 }
                 Err(e) => state.status_message = format!("Error al borrar: {e}"),
             }
-            if let Some(bucket) = state.current_bucket.as_deref() {
+            if let Some(bucket) = state.current_bucket.clone() {
                 let prefix = state.current_prefix.clone();
-                spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
+                spawn_list_objects(state, s3_client, task_tx, cache_path, &bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
@@ -203,9 +207,9 @@ fn handle_task_message(
                 Err(e) => state.status_message = format!("Error en el borrado por lotes: {e}"),
             }
             state.clear_selection();
-            if let Some(bucket) = state.current_bucket.as_deref() {
+            if let Some(bucket) = state.current_bucket.clone() {
                 let prefix = state.current_prefix.clone();
-                spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
+                spawn_list_objects(state, s3_client, task_tx, cache_path, &bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Actualizando...".to_string());
             } else {
                 state.loading_state = LoadingState::Idle;
@@ -295,7 +299,7 @@ async fn handle_key(
                 if let Some(bucket) = state.enter_bucket()
                     && !prime_objects_from_cache(state, cache_path, &bucket, "")
                 {
-                    spawn_list_objects(s3_client, task_tx, cache_path, &bucket, "");
+                    spawn_list_objects(state, s3_client, task_tx, cache_path, &bucket, "");
                     state.loading_state = LoadingState::Loading(format!("Cargando {bucket}..."));
                 }
             }
@@ -304,7 +308,7 @@ async fn handle_key(
                     && let Some(bucket) = state.current_bucket.clone()
                     && !prime_objects_from_cache(state, cache_path, &bucket, &prefix)
                 {
-                    spawn_list_objects(s3_client, task_tx, cache_path, &bucket, &prefix);
+                    spawn_list_objects(state, s3_client, task_tx, cache_path, &bucket, &prefix);
                     state.loading_state = LoadingState::Loading(format!("Cargando {prefix}..."));
                 }
             }
@@ -312,7 +316,7 @@ async fn handle_key(
         },
         KeyCode::Left | KeyCode::Char('h') => {
             if let Some((bucket, prefix)) = state.go_back() {
-                spawn_list_objects(s3_client, task_tx, cache_path, &bucket, &prefix);
+                spawn_list_objects(state, s3_client, task_tx, cache_path, &bucket, &prefix);
                 state.loading_state = LoadingState::Loading("Cargando...".to_string());
             }
         }
@@ -380,7 +384,7 @@ async fn handle_key(
                 let bucket = state.current_bucket.clone();
                 if let Some(bucket) = bucket.as_deref() {
                     let prefix = state.current_prefix.clone();
-                    spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
+                    spawn_list_objects(state, s3_client, task_tx, cache_path, bucket, &prefix);
                     state.loading_state =
                         LoadingState::Loading("Sincronizando desde S3...".to_string());
                 }
@@ -798,12 +802,14 @@ fn prime_objects_from_cache(
 }
 
 fn spawn_list_objects(
+    state: &mut AppState,
     s3_client: &S3Client,
     task_tx: &UnboundedSender<TaskMessage>,
     cache_path: &Path,
     bucket: &str,
     prefix: &str,
 ) {
+    state.pending_list = Some((bucket.to_string(), prefix.to_string()));
     let tx = task_tx.clone();
     let client = s3_client.client.clone();
     let bucket = bucket.to_string();
@@ -1153,6 +1159,213 @@ mod picker_flow_smoke {
         eprintln!(
             "FLOW OK: {report:?} meta.env={meta} info.metadata={:?}",
             detail.metadata
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_buckets_shows_each_bucket_content() {
+        use crate::app::{BucketInfo, ObjectInfo, StorageClass as AppStorageClass};
+
+        let file = |key: &str| ObjectInfo {
+            key: key.to_string(),
+            size: Some(1),
+            last_modified: None,
+            is_folder: false,
+            storage_class: AppStorageClass::Standard,
+        };
+        let cache_path = temp_cache();
+        let db = ObjectCache::open(&cache_path).unwrap();
+        db.set_prefix("alpha", "", &[file("alpha/only-a.txt")])
+            .unwrap();
+        db.set_prefix("beta", "", &[file("beta/only-b.txt")])
+            .unwrap();
+
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .region(aws_config::Region::new("us-east-1"))
+                .behavior_version_latest()
+                .build(),
+        );
+        let s3_client = S3Client::from_client(client);
+        let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+
+        let mut state = AppState::new();
+        state.buckets = vec![
+            BucketInfo {
+                name: "alpha".to_string(),
+                creation_date: None,
+            },
+            BucketInfo {
+                name: "beta".to_string(),
+                creation_date: None,
+            },
+        ];
+        state.current_panel = Panel::Buckets;
+
+        handle_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.current_bucket.as_deref(), Some("alpha"));
+        assert_eq!(state.objects[0].key, "alpha/only-a.txt");
+
+        handle_key(
+            &mut state,
+            KeyCode::Char('h'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.current_panel, Panel::Buckets, "h returns to buckets");
+
+        handle_key(
+            &mut state,
+            KeyCode::Char('j'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.selected_index, 1, "j moves onto the second bucket");
+
+        handle_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state.current_bucket.as_deref(),
+            Some("beta"),
+            "Enter opens the bucket under the cursor"
+        );
+        assert_eq!(
+            state.objects[0].key, "beta/only-b.txt",
+            "the listed content belongs to the selected bucket"
+        );
+    }
+
+    #[test]
+    fn stale_objects_response_is_ignored() {
+        use crate::app::ObjectInfo;
+
+        let file = |key: &str| ObjectInfo {
+            key: key.to_string(),
+            size: Some(1),
+            last_modified: None,
+            is_folder: false,
+            storage_class: StorageClass::Standard,
+        };
+        let mut state = AppState::new();
+        state.pending_list = Some(("beta".to_string(), String::new()));
+
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .region(aws_config::Region::new("us-east-1"))
+                .behavior_version_latest()
+                .build(),
+        );
+        let s3_client = S3Client::from_client(client);
+        let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+        let cache_path = PathBuf::from("/nonexistent");
+
+        handle_task_message(
+            &mut state,
+            TaskMessage::ObjectsLoaded {
+                bucket: "alpha".to_string(),
+                prefix: String::new(),
+                result: Ok(vec![file("alpha/only-a.txt")]),
+            },
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        );
+
+        assert!(
+            state.objects.is_empty(),
+            "a stale listing for another bucket must not overwrite the view"
+        );
+        assert_eq!(
+            state.current_bucket.as_deref(),
+            None,
+            "stale response must not change the current bucket"
+        );
+    }
+
+    #[test]
+    fn stamp_listings_keep_the_latest_request() {
+        use crate::app::ObjectInfo;
+
+        let file = |key: &str| ObjectInfo {
+            key: key.to_string(),
+            size: Some(1),
+            last_modified: None,
+            is_folder: false,
+            storage_class: StorageClass::Standard,
+        };
+        let mut state = AppState::new();
+        state.pending_list = Some(("beta".to_string(), String::new()));
+
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .region(aws_config::Region::new("us-east-1"))
+                .behavior_version_latest()
+                .build(),
+        );
+        let s3_client = S3Client::from_client(client);
+        let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+        let cache_path = PathBuf::from("/nonexistent");
+
+        handle_task_message(
+            &mut state,
+            TaskMessage::ObjectsLoaded {
+                bucket: "alpha".to_string(),
+                prefix: String::new(),
+                result: Ok(vec![file("alpha/only-a.txt")]),
+            },
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        );
+        assert!(
+            state.objects.is_empty(),
+            "alpha's late response must not clobber beta, which the user is now viewing"
+        );
+
+        handle_task_message(
+            &mut state,
+            TaskMessage::ObjectsLoaded {
+                bucket: "beta".to_string(),
+                prefix: String::new(),
+                result: Ok(vec![file("beta/only-b.txt")]),
+            },
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        );
+        assert_eq!(
+            state.current_bucket.as_deref(),
+            Some("beta"),
+            "beta is the bucket the user selected"
+        );
+        assert_eq!(
+            state.objects[0].key, "beta/only-b.txt",
+            "only beta's objects appear in the view"
+        );
+        assert!(
+            state.pending_list.is_none(),
+            "applied response clears the pending request"
         );
     }
 
