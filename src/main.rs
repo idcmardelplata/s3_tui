@@ -257,6 +257,23 @@ async fn handle_key(
     task_tx: &UnboundedSender<TaskMessage>,
     cache_path: &Path,
 ) -> Result<()> {
+    if state.show_help {
+        match code {
+            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                state.show_help = false;
+                state.help_scroll = 0;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.help_scroll = state.help_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.help_scroll = state.help_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     if state.input_mode != InputMode::None {
         handle_input_key(state, code, s3_client, task_tx, cache_path).await;
         return Ok(());
@@ -267,9 +284,9 @@ async fn handle_key(
             state.should_quit = true;
         }
         KeyCode::Char('?') => {
-            state.status_message =
-                "Help: q:quit | u:upload(multi) | g:download | d:delete | Space:select | a:all | c:clear | r:refresh | Enter:open | ←:back | ↑↓:nav"
-                    .to_string();
+            state.show_help = true;
+            state.help_scroll = 0;
+            state.status_message = "?:cierra la ayuda · ↑↓/jk:desplazar".to_string();
         }
         KeyCode::Up | KeyCode::Char('k') => state.select_prev(),
         KeyCode::Down | KeyCode::Char('j') => state.select_next(),

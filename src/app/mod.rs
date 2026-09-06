@@ -349,6 +349,10 @@ pub struct AppState {
     pub file_picker: FilePicker,
     /// Per-file metadata gathered right before the upload is started.
     pub metadata_editor: MetadataEditor,
+    /// Whether the keyboard-shortcuts help panel is on screen.
+    pub show_help: bool,
+    /// Scroll offset used inside the help panel.
+    pub help_scroll: usize,
 }
 
 impl AppState {
@@ -373,6 +377,8 @@ impl AppState {
             theme: resolve(),
             file_picker: FilePicker::new(),
             metadata_editor: MetadataEditor::default(),
+            show_help: false,
+            help_scroll: 0,
         }
     }
 

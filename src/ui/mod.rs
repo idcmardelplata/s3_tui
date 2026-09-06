@@ -2,7 +2,7 @@ pub mod theme;
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -69,6 +69,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
         InputMode::None => {}
         _ => render_input_popup(frame, state, &theme),
     }
+
+    if state.show_help {
+        render_help_panel(frame, state, &theme);
+    }
 }
 
 fn render_main(frame: &mut Frame, state: &mut AppState, theme: &Theme, area: Rect) {
@@ -128,14 +132,6 @@ fn render_bucket_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         .title(Line::from(Span::styled(
             centered_title("Buckets"),
             panel_title(theme),
-        )))
-        .title_bottom(Line::from(Span::styled(
-            if active {
-                " Enter: abrir  /  h: atrás "
-            } else {
-                ""
-            },
-            Style::default().fg(theme.text_dim),
         )))
         .borders(Borders::ALL)
         .border_style(panel_border(theme, active))
@@ -508,11 +504,6 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect
 }
 
 fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
-    let chunks = Layout::default()
-        .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(area);
-
     let loading_text = match &state.loading_state {
         LoadingState::Idle => String::new(),
         LoadingState::Loading(msg) => format!(" {msg}"),
@@ -534,39 +525,17 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
     .block(Block::default().borders(Borders::NONE))
     .wrap(Wrap { trim: false });
 
-    let help_keys: &[(&str, &str)] = &[
-        ("?", "ayuda"),
-        ("q", "salir"),
-        ("u", "subir"),
-        ("g", "bajar"),
-        ("espacio", "sel"),
-        ("a", "todo"),
-        ("c", "limpiar"),
-        ("i", "info"),
-        ("/", "filtro"),
-        ("d", "borrar"),
-        ("Esc", "atrás"),
-    ];
-    let mut line: Vec<Span> = Vec::new();
-    for (k, v) in help_keys {
-        line.push(Span::styled(
-            format!(" {k}:{v} "),
-            Style::default().fg(theme.text_dim),
-        ));
-    }
-
-    let help = Paragraph::new(Line::from(line))
-        .alignment(Alignment::Right)
-        .block(Block::default().borders(Borders::NONE))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(status, chunks[0]);
-    frame.render_widget(help, chunks[1]);
+    frame.render_widget(status, area);
 }
 
 fn render_legend(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
     let _ = state;
-    let legend = Paragraph::new(Line::from(vec![
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let author = Paragraph::new(Line::from(vec![
         Span::styled(" s3-tui ", panel_title(theme)),
         Span::styled("by: ", Style::default().fg(theme.text_dim)),
         Span::styled(
@@ -577,18 +546,161 @@ fn render_legend(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect)
         ),
     ]))
     .block(Block::default().borders(Borders::NONE));
-    frame.render_widget(legend, area);
+    frame.render_widget(author, chunks[0]);
+
+    let help_hint = Paragraph::new(Line::from(vec![
+        Span::styled(" ?", Style::default().fg(theme.text_dim)),
+        Span::styled(": ", Style::default().fg(theme.text_dim)),
+        Span::styled(
+            "Ayuda",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default().fg(theme.text_dim)),
+    ]))
+    .alignment(ratatui::layout::Alignment::Right)
+    .block(Block::default().borders(Borders::NONE));
+    frame.render_widget(help_hint, chunks[1]);
+}
+
+/// Keyboard-shortcut documentation shown by the help panel (`?`).
+const HELP_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Navegación",
+        &[
+            ("?", "abrir/cerrar esta ayuda"),
+            ("↑↓ / j/k", "mover el cursor"),
+            ("Enter", "abrir bucket o carpeta"),
+            ("← / h", "volver atrás"),
+            ("/", "filtrar objetos"),
+            ("Esc", "cancelar / volver"),
+            ("q", "salir"),
+        ],
+    ),
+    (
+        "Objetos",
+        &[
+            ("u", "subir archivos (selector)"),
+            ("g", "descargar objeto o selección"),
+            ("d", "borrar objeto o selección"),
+            ("i", "información del objeto"),
+            ("r", "refrescar desde S3"),
+            ("Espacio", "marcar / desmarcar"),
+            ("a", "marcar todos los visibles"),
+            ("c", "limpiar selección"),
+        ],
+    ),
+    (
+        "Selector de archivos",
+        &[
+            ("Enter/→", "abrir carpeta"),
+            ("←/Backspace", "volver / borrar filtro"),
+            ("Espacio", "marcar archivo"),
+            ("a", "marcar todo"),
+            ("c", "limpiar"),
+            ("u", "abrir el editor de metadatos"),
+        ],
+    ),
+    (
+        "Editor de metadatos",
+        &[
+            ("↑↓", "mover fila"),
+            ("Tab", "clave ⇄ valor"),
+            ("Enter", "aceptar celda"),
+            ("A", "agregar fila"),
+            ("D", "borrar fila"),
+            ("N/P", "cambiar archivo"),
+            ("C", "clase de almacenamiento"),
+            ("U", "subir"),
+        ],
+    ),
+    (
+        "Clase de almacenamiento",
+        &[
+            ("↑↓ / j/k", "elegir clase"),
+            ("Enter", "confirmar"),
+            ("Esc", "cancelar"),
+        ],
+    ),
+];
+
+/// Styled lines of the help panel body, grouped by context.
+fn help_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (title, bindings) in HELP_SECTIONS {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {title} "),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("─".repeat(38), Style::default().fg(theme.border)),
+        ]));
+        for (key, desc) in *bindings {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {key:<14}"), Style::default().fg(theme.text_dim)),
+                Span::styled(*desc, Style::default().fg(theme.text)),
+            ]));
+        }
+    }
+    lines
+}
+
+/// Full-screen help panel with every keyboard shortcut, toggled with `?`.
+fn render_help_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
+    let area = frame.area();
+    let height = (area.height.saturating_mul(4) / 5).max(12);
+    let popup = centered_rect(80, height, area);
+    frame.render_widget(Clear, popup);
+
+    let inner = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(popup);
+
+    let lines = help_lines(theme);
+    let body_height = inner[1].height as usize;
+    state.help_scroll = state
+        .help_scroll
+        .min(lines.len().saturating_sub(body_height));
+    let paragraph = Paragraph::new(lines)
+        .scroll((state.help_scroll as u16, 0))
+        .block(Block::default().borders(Borders::NONE));
+    frame.render_widget(paragraph, inner[1]);
+
+    let footer = Line::from(vec![
+        Span::styled(" ↑↓/jk:desplazar ", Style::default().fg(theme.text_dim)),
+        Span::styled("?:cerrar ", Style::default().fg(theme.accent)),
+        Span::styled("Esc/q:cerrar ", Style::default().fg(theme.text_dim)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(footer).block(Block::default().borders(Borders::NONE)),
+        inner[2],
+    );
+
+    let block = Block::default()
+        .title(Line::from(Span::styled(
+            centered_title("Ayuda — atajos de teclado"),
+            panel_title(theme),
+        )))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent_dim))
+        .style(Style::default().bg(theme.surface));
+    frame.render_widget(block, popup);
 }
 
 fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
     {
@@ -712,25 +824,6 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         .block(Block::default().borders(Borders::NONE)),
         chunks[1],
     );
-
-    let help = upload_help_line(
-        theme,
-        &[
-            ("\u{2191}\u{2193}", "mover"),
-            ("Enter/\u{2192}", "abrir dir"),
-            ("Espacio", "marcar"),
-            ("a", "todo"),
-            ("c", "limpiar"),
-            ("u", "agregar metadatos"),
-            ("Esc", "atrás"),
-        ],
-    );
-    frame.render_widget(
-        Paragraph::new(help)
-            .block(Block::default().borders(Borders::NONE))
-            .wrap(Wrap { trim: false }),
-        chunks[2],
-    );
 }
 
 fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
@@ -758,11 +851,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
 
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
     let editor = &state.metadata_editor;
@@ -898,16 +987,17 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         MetadataField::Key => "CLAVE",
         MetadataField::Value => "VALOR",
     };
+    let storage_class = state.metadata_editor.storage_class.to_string();
     let buffer_text = if state.input_buffer.is_empty() {
         format!(
-            " elemento {}/{} · {} entrada(s) · editando {field_name}",
+            " elemento {}/{} · {} entrada(s) · editando {field_name} · clase: {storage_class}",
             editor.selected + 1,
             editor.len(),
             editor.entries_len()
         )
     } else {
         format!(
-            " elemento {}/{} · {} entrada(s) · editando {field_name} · `{}`",
+            " elemento {}/{} · {} entrada(s) · editando {field_name} · `{}` · clase: {storage_class}",
             editor.selected + 1,
             editor.len(),
             editor.entries_len(),
@@ -922,38 +1012,6 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         .block(Block::default().borders(Borders::NONE)),
         chunks[1],
     );
-
-    let storage_class = state.metadata_editor.storage_class.to_string();
-    let class_description = format!("clase ({storage_class})");
-    let help = upload_help_line(
-        theme,
-        &[
-            ("\u{2191}\u{2193}", "fila"),
-            ("Tab", "clave/valor"),
-            ("Enter", "aceptar"),
-            ("A", "fila"),
-            ("D", "borrar"),
-            ("N/P", "archivo"),
-            ("C", class_description.as_str()),
-            ("U", "subir"),
-            ("Esc", "atrás"),
-        ],
-    );
-    frame.render_widget(
-        Paragraph::new(help)
-            .block(Block::default().borders(Borders::NONE))
-            .wrap(Wrap { trim: false }),
-        chunks[2],
-    );
-}
-
-/// One-line action documentation: each entry is a ` key:descripción ` span.
-fn upload_help_line<'a>(theme: &Theme, help: &[(&'a str, &'a str)]) -> Line<'a> {
-    let spans: Vec<Span> = help
-        .iter()
-        .map(|(k, v)| Span::styled(format!(" {k}:{v} "), Style::default().fg(theme.text_dim)))
-        .collect();
-    Line::from(spans)
 }
 
 /// True while the picker failed to read its directory (hint is set).
@@ -1022,10 +1080,6 @@ fn render_storage_class_picker(frame: &mut Frame, state: &mut AppState, theme: &
                 state.metadata_editor.len()
             )),
             panel_title(theme),
-        )))
-        .title_bottom(Line::from(Span::styled(
-            " ↑↓:elegir · Enter:confirmar · Esc:cancelar ",
-            Style::default().fg(theme.text_dim),
         )))
         .borders(Borders::ALL)
         .border_style(panel_border(theme, true))
@@ -1283,6 +1337,14 @@ mod tests {
         assert_eq!(y, 29, "legend is the last row");
         let cell = buffer.cell((x, y)).unwrap();
         assert_eq!(cell.fg, legend_color, "author name uses accent color");
+
+        let (hx, hy) =
+            locate(&buffer, "Ayuda").expect("visible ?: Ayuda hint in the bottom-right legend");
+        assert_eq!(hy, 29, "help hint shares the last legend row");
+        assert!(
+            hx > buffer.area.width / 2,
+            "help hint sits on the right half at x = {hx}"
+        );
     }
 
     #[test]
@@ -1388,77 +1450,75 @@ mod tests {
     }
 
     #[test]
-    fn metadata_editor_documents_actions_without_overlap() {
-        let mut state = sample_state();
-        state.input_mode = InputMode::Metadata;
-        state.metadata_editor =
-            crate::app::MetadataEditor::from_paths(vec![std::path::PathBuf::from("/tmp/a.txt")]);
-        state.metadata_editor.storage_class = StorageClass::Glacier;
-        state.metadata_editor.files[0]
-            .1
-            .push(("env".to_string(), "prod".to_string()));
-
-        for width in [120u16, 80u16] {
-            let buffer = draw(&mut state, width, 18);
-            for needle in [
-                "\u{2191}\u{2193}:fila",
-                "A:fila",
-                "D:borrar",
-                "Tab:clave/valor",
-                "C:clase",
-                "U:subir",
-                "Esc:atrás",
-            ] {
-                assert!(
-                    locate(&buffer, needle).is_some(),
-                    "metadata docs '{needle}' fully visible at {width} cols"
-                );
-            }
-            assert!(
-                locate(&buffer, "GLACIER").is_some(),
-                "current storage class shown at {width} cols"
-            );
+    fn help_panel_documents_commands() {
+        let theme = theme::from_id("dracula");
+        let text: String = help_lines(&theme)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "Navegación",
+            "Objetos",
+            "Selector de archivos",
+            "Editor de metadatos",
+            "Clase de almacenamiento",
+            "salir",
+            "subir",
+            "descargar",
+            "borrar",
+            "información",
+            "filtrar",
+            "marcar",
+            "limpiar",
+            "metadatos",
+            "confirmar",
+            "clave",
+            "valor",
+        ] {
+            assert!(text.contains(needle), "help documents '{needle}'");
         }
-        let buffer = draw(&mut state, 80, 18);
+
+        let mut state = sample_state();
+        state.show_help = true;
+        let buffer = draw(&mut state, 100, 30);
         assert!(
-            locate(&buffer, "atrás").is_some(),
-            "doc wraps into the reserved second row, tail not clipped"
+            locate(&buffer, "Ayuda — atajos").is_some(),
+            "help panel title rendered"
         );
         assert!(
-            locate(&buffer, "U:subir").is_some(),
-            "last actions still visible after the wrap"
+            locate(&buffer, "Navegación").is_some(),
+            "first section visible"
+        );
+        assert!(
+            locate(&buffer, "salir").is_some(),
+            "first section bindings rendered"
+        );
+        assert!(
+            locate(&buffer, "?:cerrar").is_some(),
+            "key to close the panel is documented"
         );
     }
 
     #[test]
-    fn file_picker_documents_actions_without_overlap() {
+    fn help_panel_scrolls_with_arrows() {
         let mut state = sample_state();
-        state.input_mode = InputMode::FilePicker;
-        for width in [120u16, 80u16] {
-            let buffer = draw(&mut state, width, 18);
-            for needle in [
-                "\u{2191}\u{2193}:mover",
-                "Enter/\u{2192}:abrir",
-                "Espacio:marcar",
-                "a:todo",
-                "c:limpiar",
-                "u:agregar",
-                "Esc:atrás",
-            ] {
-                assert!(
-                    locate(&buffer, needle).is_some(),
-                    "picker docs '{needle}' fully visible at {width} cols"
-                );
-            }
-            assert!(
-                locate(&buffer, "metadatos").is_some(),
-                "the u:agregar metadatos action is documented at {width} cols"
-            );
-        }
-        let buffer = draw(&mut state, 80, 18);
+        state.show_help = true;
+        let buffer = draw(&mut state, 60, 14);
         assert!(
-            locate(&buffer, "atrás").is_some(),
-            "picker doc tail not clipped after the wrap"
+            locate(&buffer, "confirmar").is_none(),
+            "last binding initially off-screen on a small terminal"
+        );
+        state.help_scroll = 100;
+        let buffer = draw(&mut state, 60, 14);
+        assert!(
+            locate(&buffer, "confirmar").is_some(),
+            "scrolling reaches the last binding"
         );
     }
 }
