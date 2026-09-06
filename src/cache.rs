@@ -5,13 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::app::ObjectInfo;
 
-/// Directory (under `$HOME/.cache`) where the SQLite database lives.
 pub const CACHE_DIR_NAME: &str = "s3-tui";
-/// Name of the SQLite database file holding the object listings.
 pub const CACHE_DB_NAME: &str = "cache.db";
 
-/// Absolute path of the cache database, honouring `$HOME` (or the system
-/// temp dir when `$HOME` is unset).
 pub fn cache_db_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -21,11 +17,7 @@ pub fn cache_db_path() -> PathBuf {
         .join(CACHE_DB_NAME)
 }
 
-/// A writable handle over the SQLite object cache.
-///
-/// The schema keeps one row per `(bucket, prefix, key)` so listings from
-/// different buckets and folders never collide. Rows are upserted on write and
-/// pruned when a whole folder is re-listed.
+/// Writable handle over the SQLite object cache.
 pub struct ObjectCache {
     conn: Connection,
 }
@@ -50,13 +42,11 @@ fn row_to_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectInfo> {
 }
 
 impl ObjectCache {
-    /// Open (creating if needed) the cache database at its default location.
     pub fn open_default() -> Result<Self> {
         let path = cache_db_path();
         Self::open(&path)
     }
 
-    /// Open (creating if needed) the cache database at `path`.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -88,7 +78,6 @@ impl ObjectCache {
     }
 
     fn ensure_prefix_rows(&self, bucket: &str, prefix: &str, objects: &[ObjectInfo]) -> Result<()> {
-        // Every key in the rows is already prefixed with `prefix`.
         let wanted: HashSet<&str> = objects.iter().map(|o| o.key.as_str()).collect();
 
         let existing: Vec<String> = {
@@ -120,7 +109,6 @@ impl ObjectCache {
             }
         }
 
-        // Upsert every known object.
         let mut stmt = self
             .conn
             .prepare(
@@ -154,9 +142,8 @@ impl ObjectCache {
     }
 
     /// Replace the cached listing of `(bucket, prefix)` with `objects`,
-    /// pruning stale rows and upserting current ones. The remote listing is
-    /// the source of truth. Marks `(bucket, prefix)` as cacheable even when
-    /// `objects` is empty.
+    /// pruning stale rows and upserting current ones. Returns `true` when the
+    /// cache had a different listing and was overwritten.
     pub fn set_prefix(&self, bucket: &str, prefix: &str, objects: &[ObjectInfo]) -> Result<()> {
         self.ensure_prefix_rows(bucket, prefix, objects)?;
         self.conn
@@ -169,8 +156,15 @@ impl ObjectCache {
         Ok(())
     }
 
-    /// `true` when the cache has a recorded listing for `(bucket, prefix)` (it
-    /// may be empty). Used to decide whether a remote first-list is needed.
+    /// Update the cached listing only when it differs from the remote one.
+    pub fn sync_listing(&self, bucket: &str, prefix: &str, remote: &[ObjectInfo]) -> Result<()> {
+        match self.get_prefix(bucket, prefix)? {
+            Some(local) if listings_match(&local, remote) => Ok(()),
+            _ => self.set_prefix(bucket, prefix, remote),
+        }
+    }
+
+    /// `true` when the cache has a recorded listing for `(bucket, prefix)`.
     pub fn listing_exists(&self, bucket: &str, prefix: &str) -> Result<bool> {
         let mut stmt = self
             .conn
@@ -182,10 +176,8 @@ impl ObjectCache {
         Ok(exists)
     }
 
-    /// Mark a single object as having been uploaded by this app. The row is
-    /// kept even though the folder it belongs to may be pruned later by a full
-    /// re-list; that is fine because uploads normally follow the last re-list
-    /// and the next re-list will refresh from S3 anyway.
+    /// Record a freshly-uploaded object until the next re-list refreshes it
+    /// from S3.
     pub fn upsert_object(
         &self,
         bucket: &str,
@@ -193,9 +185,7 @@ impl ObjectCache {
         size: u64,
         metadata: &[(&str, &str)],
     ) -> Result<()> {
-        // `storage_class` for a freshly-uploaded object. We only persist a
-        // coarse STANDARD marker; the next re-list from S3 replaces it.
-        let (prefix, _name) = object_prefix_and_name(bucket, key);
+        let prefix = object_prefix(key);
         let sc = if metadata.is_empty() { "" } else { "STANDARD" };
         self.conn
             .execute(
@@ -212,8 +202,7 @@ impl ObjectCache {
         Ok(())
     }
 
-    /// Return the cached listing of `(bucket, prefix)`, or `None` when the
-    /// cache has no knowledge of that folder yet.
+    /// Cached listing of `(bucket, prefix)`, or `None` when unknown.
     pub fn get_prefix(&self, bucket: &str, prefix: &str) -> Result<Option<Vec<ObjectInfo>>> {
         let mut stmt = self
             .conn
@@ -236,13 +225,12 @@ impl ObjectCache {
     }
 }
 
-/// Split an object's full key into its folder `prefix` and the bare file name
-/// stored in the cache (the cache keys a row by `(bucket, prefix, key)` where
-/// `prefix` is the folder being listed).
-fn object_prefix_and_name(_bucket: &str, key: &str) -> (String, String) {
+/// Folder prefix of an object's full key, including the trailing slash when
+/// the key lives in a folder. The cache keys rows by `(bucket, prefix, key)`.
+fn object_prefix(key: &str) -> String {
     match key.rfind('/') {
-        Some(pos) => (key[..=pos].to_string(), key[pos + 1..].to_string()),
-        None => (String::new(), key.to_string()),
+        Some(pos) => key[..=pos].to_string(),
+        None => String::new(),
     }
 }
 
@@ -362,5 +350,21 @@ mod tests {
         let mut changed = b.clone();
         changed[0].size = Some(99);
         assert!(!listings_match(&a, &changed));
+    }
+
+    #[test]
+    fn sync_listing_skips_identical_remotes() {
+        let cache = temp_db("sync");
+        cache
+            .set_prefix("b", "", &[object("a.txt", Some(1), true)])
+            .unwrap();
+        cache
+            .sync_listing("b", "", &[object("a.txt", Some(1), true)])
+            .unwrap();
+        let mut remote = vec![object("b.txt", Some(2), true)];
+        cache.sync_listing("b", "", &remote).unwrap();
+        remote.clear();
+        let got = cache.get_prefix("b", "").unwrap().unwrap();
+        assert_eq!(got[0].key, "b.txt");
     }
 }

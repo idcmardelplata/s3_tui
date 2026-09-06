@@ -9,10 +9,7 @@ use crate::ui::theme::{Theme, resolve};
 pub enum Panel {
     Buckets,
     Objects,
-    #[allow(dead_code)]
     Preview,
-    #[allow(dead_code)]
-    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -20,16 +17,12 @@ pub enum LoadingState {
     Idle,
     Loading(String),
     Error(String),
-    #[allow(dead_code)]
-    Success(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct BucketInfo {
     pub name: String,
     pub creation_date: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
-    pub region: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,25 +92,21 @@ pub struct ObjectDetail {
     pub etag: Option<String>,
     pub content_type: Option<String>,
     pub content_length: Option<u64>,
-    /// User metadata attached at upload time (`x-amz-meta-*`), key-sorted.
     pub metadata: Vec<(String, String)>,
 }
 
-/// Summary produced by a batch download of multiple objects.
 #[derive(Debug, Clone, Default)]
 pub struct DownloadReport {
     pub downloaded: Vec<String>,
     pub failures: Vec<(String, String)>,
 }
 
-/// Summary produced by a batch upload of multiple local files.
 #[derive(Debug, Clone, Default)]
 pub struct UploadReport {
     pub uploaded: Vec<String>,
     pub failures: Vec<(String, String)>,
 }
 
-/// Which cell of a metadata row is being edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MetadataField {
     #[default]
@@ -164,7 +153,7 @@ impl MetadataEditor {
             .unwrap_or(0)
     }
 
-    /// Switch to the next/previous marked file and reset the cell cursor.
+    /// Move the cursor onto the next/previous marked file.
     pub fn select_next(&mut self) {
         if self.selected + 1 < self.files.len() {
             self.selected += 1;
@@ -181,8 +170,7 @@ impl MetadataEditor {
         self.field = MetadataField::Key;
     }
 
-    /// Write `buffer` into the active cell of the current row. An empty buffer
-    /// means "no pending edit" and leaves the cell untouched.
+    /// Write `buffer` into the active cell. An empty buffer leaves it untouched.
     pub fn commit_cell(&mut self, buffer: &str) {
         if buffer.is_empty() {
             return;
@@ -215,7 +203,7 @@ impl MetadataEditor {
         self.row = next;
     }
 
-    /// Append a fresh empty row at the end and move the cursor onto it.
+    /// Append a fresh empty row and move the cursor onto it.
     pub fn add_row(&mut self) {
         if let Some((_, entries)) = self.files.get_mut(self.selected) {
             entries.push((String::new(), String::new()));
@@ -233,9 +221,9 @@ impl MetadataEditor {
             .unwrap_or(true)
     }
 
-    /// After committing a value, move onto the next row. When the committed
-    /// row is the last one and it already holds content, a fresh empty row is
-    /// appended so several metadata can be typed in sequence.
+    /// After committing a value, move onto the next row; a fresh empty row is
+    /// appended when the committed row was the last one and already holds
+    /// content, so several metadata can be typed in sequence.
     pub fn advance_after_value(&mut self) {
         self.field = MetadataField::Key;
         if self.entries_len() == 0 {
@@ -248,8 +236,7 @@ impl MetadataEditor {
         }
     }
 
-    /// Remove the row under the cursor. Returns `false` when there is nothing
-    /// to remove.
+    /// Remove the row under the cursor. Returns `false` when there is nothing to remove.
     pub fn delete_row(&mut self) -> bool {
         let Some((_, entries)) = self.files.get_mut(self.selected) else {
             return false;
@@ -265,8 +252,8 @@ impl MetadataEditor {
         true
     }
 
-    /// The list of (path, metadata) pairs to hand to the uploader. Rows with
-    /// an empty key are skipped (they would make S3 reject the request).
+    /// List of (path, metadata) pairs to hand to the uploader. Rows with an
+    /// empty key are skipped (S3 rejects them).
     pub fn to_upload(&self) -> Vec<(PathBuf, Vec<(String, String)>)> {
         self.files
             .iter()
@@ -321,7 +308,6 @@ pub struct AppState {
     pub current_bucket: Option<String>,
     pub current_prefix: String,
     pub selected_index: usize,
-    #[allow(dead_code)]
     pub scroll_offset: usize,
     pub loading_state: LoadingState,
     pub input_mode: InputMode,
@@ -329,8 +315,6 @@ pub struct AppState {
     pub pending_action: PendingAction,
     pub status_message: String,
     pub should_quit: bool,
-    #[allow(dead_code)]
-    pub region: String,
     pub filter: String,
     pub selected_object_detail: Option<ObjectDetail>,
     /// Keys of objects currently multi-selected for batch operations.
@@ -344,7 +328,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(region: String) -> Self {
+    pub fn new() -> Self {
         Self {
             current_panel: Panel::Buckets,
             buckets: Vec::new(),
@@ -359,7 +343,6 @@ impl AppState {
             pending_action: PendingAction::None,
             status_message: String::from("Presioná ? para la ayuda"),
             should_quit: false,
-            region,
             filter: String::new(),
             selected_object_detail: None,
             selected_keys: HashSet::new(),
@@ -395,7 +378,7 @@ impl AppState {
         self.visible_indices().len()
     }
 
-    /// Returns the currently selected object taking the filter into account.
+    /// The currently selected object taking the filter into account.
     pub fn selected_object(&self) -> Option<&ObjectInfo> {
         let visible = self.visible_indices();
         visible.get(self.selected_index).map(|&i| &self.objects[i])
@@ -474,7 +457,6 @@ impl AppState {
         match self.current_panel {
             Panel::Objects => {
                 if self.current_prefix.is_empty() {
-                    // Go back to buckets list
                     self.current_panel = Panel::Buckets;
                     self.current_bucket = None;
                     self.objects.clear();
@@ -483,7 +465,6 @@ impl AppState {
                     self.status_message = String::from("Presioná ? para la ayuda");
                     None
                 } else {
-                    // Go up one level in prefix
                     let old_prefix = self.current_prefix.clone();
                     if let Some(parent) = self.current_prefix.trim_end_matches('/').rfind('/') {
                         self.current_prefix = self.current_prefix[..=parent].to_string();
@@ -520,8 +501,7 @@ impl AppState {
         self.pending_action = PendingAction::None;
     }
 
-    /// Move the marked files from the picker into the metadata editor and
-    /// enter `InputMode::Metadata`.
+    /// Move the marked files from the picker into the metadata editor.
     pub fn start_metadata(&mut self, paths: Vec<PathBuf>) {
         self.metadata_editor = MetadataEditor::from_paths(paths);
         self.input_mode = InputMode::Metadata;
@@ -553,7 +533,7 @@ impl AppState {
         }
     }
 
-    /// Returns the keys currently marked for batch download.
+    /// Keys currently marked for batch download.
     pub fn selected_keys_in_visible(&self) -> Vec<String> {
         self.visible_indices()
             .iter()
@@ -571,6 +551,12 @@ impl AppState {
     /// Drop the whole multi-selection.
     pub fn clear_selection(&mut self) {
         self.selected_keys.clear();
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

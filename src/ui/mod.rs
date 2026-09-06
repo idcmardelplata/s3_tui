@@ -189,14 +189,16 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     let bucket = state.current_bucket.clone();
     let prefix = state.current_prefix.clone();
 
-    // Update the scroll offset so the selected row stays on screen.
     let visible_height = area.height.saturating_sub(3); // borders + table header
-    update_scroll_offset(state, visible_height);
+    state.scroll_offset = follow_selection(
+        state.selected_index,
+        state.scroll_offset,
+        visible_height as usize,
+    );
 
     let visible = state.visible_indices();
     let visible_total = visible.len();
 
-    // ---- Build the table header -------------------------------------------
     let sel_hdr = Span::styled("Sel", panel_title(theme));
     let icon_hdr = Span::styled("", panel_title(theme));
     let name_hdr = Span::styled("Nombre", panel_title(theme));
@@ -213,7 +215,6 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     ])
     .style(theme.surface);
 
-    // ---- Build rows --------------------------------------------------------
     let rows: Vec<Row> = visible
         .iter()
         .enumerate()
@@ -283,7 +284,6 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
         })
         .collect();
 
-    // ---- Panel title with metrics -----------------------------------------
     let mut title = if let Some(bucket) = &bucket {
         format!("s3://{bucket}/{prefix}")
     } else {
@@ -340,17 +340,17 @@ fn render_object_panel(frame: &mut Frame, state: &mut AppState, theme: &Theme, a
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-/// Keep `state.scroll_offset` so the selected row is visible within the area.
-fn update_scroll_offset(state: &mut AppState, visible_height: u16) {
-    if visible_height == 0 {
-        return;
+/// Return the scroll offset so `selected` stays visible within `available` rows.
+fn follow_selection(selected: usize, offset: usize, available: usize) -> usize {
+    if available == 0 {
+        return offset;
     }
-    let sel = state.selected_index;
-    let available = visible_height as usize;
-    if sel < state.scroll_offset {
-        state.scroll_offset = sel;
-    } else if state.scroll_offset + available <= sel {
-        state.scroll_offset = sel.saturating_sub(available - 1);
+    if selected < offset {
+        selected
+    } else if offset + available <= selected {
+        selected.saturating_sub(available - 1)
+    } else {
+        offset
     }
 }
 
@@ -516,12 +516,10 @@ fn render_status_bar(frame: &mut Frame, state: &AppState, theme: &Theme, area: R
         LoadingState::Idle => String::new(),
         LoadingState::Loading(msg) => format!(" {msg}"),
         LoadingState::Error(msg) => format!(" Error: {msg}"),
-        LoadingState::Success(msg) => format!(" {msg}"),
     };
     let status_style = match state.loading_state {
         LoadingState::Error(_) => theme.error,
         LoadingState::Loading(_) => theme.warning,
-        LoadingState::Success(_) => theme.success,
         LoadingState::Idle => theme.text,
     };
 
@@ -597,11 +595,11 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         let visible_total = picker.visible_count();
         let inner_height = chunks[0].height.saturating_sub(2);
         if visible_total > 0 {
-            let sel = picker.selected_index.min(visible_total - 1);
-            if sel < picker.scroll_offset {
-                picker.scroll_offset = sel;
-            } else if picker.scroll_offset + inner_height as usize <= sel {
-                picker.scroll_offset = sel.saturating_sub(inner_height as usize - 1);
+            let inner_height = chunks[0].height.saturating_sub(2);
+            if inner_height > 0 {
+                let sel = picker.selected_index.min(visible_total - 1);
+                picker.scroll_offset =
+                    follow_selection(sel, picker.scroll_offset, inner_height as usize);
             }
         }
 
@@ -1085,13 +1083,12 @@ mod tests {
     }
 
     fn sample_state() -> AppState {
-        let mut state = AppState::new("us-east-1".to_string());
+        let mut state = AppState::new();
         state.current_panel = Panel::Objects;
         state.current_bucket = Some("demo".to_string());
         state.buckets = vec![BucketInfo {
             name: "demo".to_string(),
             creation_date: Some(chrono::Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap()),
-            region: "us-east-1".to_string(),
         }];
         state.objects = vec![
             ObjectInfo {

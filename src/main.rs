@@ -2,14 +2,13 @@ mod app;
 mod cache;
 mod cli;
 mod config;
-mod errors;
 mod filepicker;
 mod s3;
 mod ui;
 
 use anyhow::{Context, Result};
 use app::{AppState, InputMode, LoadingState, MetadataField, Panel, PendingAction, TaskMessage};
-use cache::{ObjectCache, listings_match};
+use cache::ObjectCache;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -40,7 +39,7 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     settings: &cli::ResolvedSettings,
 ) -> Result<()> {
-    let mut state = AppState::new(settings.region.clone());
+    let mut state = AppState::new();
     let s3_client = S3Client::new(
         &settings.region,
         settings.endpoint.as_deref(),
@@ -63,21 +62,15 @@ async fn run_app(
     let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
     let bucket_tx = task_tx.clone();
 
-    // Object cache (SQLite) — used to avoid re-fetching listings from S3.
     ObjectCache::open_default().context("failed to open object cache (SQLite)")?;
     let cache_path = cache::cache_db_path();
 
-    // Load buckets on startup
     state.loading_state = LoadingState::Loading("Cargando buckets...".to_string());
     terminal.draw(|frame| ui::render(frame, &mut state))?;
 
     let client = s3_client.client.clone();
-    let region_owned = settings.region.clone();
     tokio::spawn(async move {
-        match S3Client::from_client(client, &region_owned)
-            .list_buckets()
-            .await
-        {
+        match S3Client::from_client(client).list_buckets().await {
             Ok(buckets) => {
                 let _ = bucket_tx.send(TaskMessage::BucketsLoaded(Ok(buckets)));
             }
@@ -90,7 +83,6 @@ async fn run_app(
     loop {
         terminal.draw(|frame| ui::render(frame, &mut state))?;
 
-        // Drain task queue
         while let Ok(message) = task_rx.try_recv() {
             handle_task_message(&mut state, message, &s3_client, &task_tx, &cache_path);
         }
@@ -186,7 +178,6 @@ fn handle_task_message(
                 }
                 Err(e) => state.status_message = format!("Error al borrar: {e}"),
             }
-            // Refresh the object list after a successful (or attempted) delete
             if let Some(bucket) = state.current_bucket.as_deref() {
                 let prefix = state.current_prefix.clone();
                 spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
@@ -447,7 +438,7 @@ async fn handle_input_key(
                         let client = s3_client.client.clone();
                         let key_for_msg = key.clone();
                         tokio::spawn(async move {
-                            let result = match S3Client::from_client(client, "")
+                            let result = match S3Client::from_client(client)
                                 .delete_object(&bucket, &key)
                                 .await
                             {
@@ -464,7 +455,7 @@ async fn handle_input_key(
                         let tx = task_tx.clone();
                         let client = s3_client.client.clone();
                         tokio::spawn(async move {
-                            let result = match S3Client::from_client(client, "")
+                            let result = match S3Client::from_client(client)
                                 .delete_objects(&bucket, &keys)
                                 .await
                             {
@@ -473,7 +464,6 @@ async fn handle_input_key(
                             };
                             let _ = tx.send(TaskMessage::ObjectsDeleted { result });
                         });
-                        state.cancel_input();
                         state.clear_selection();
                         state.loading_state =
                             LoadingState::Loading(format!("Borrando {n} objeto(s)..."));
@@ -495,15 +485,7 @@ async fn handle_input_key(
                     state.file_picker.toggle_selected();
                 }
             }
-            KeyCode::Left => {
-                if state.file_picker.filter.is_empty() {
-                    state.file_picker.go_up();
-                } else {
-                    state.file_picker.filter.pop();
-                    state.file_picker.selected_index = 0;
-                }
-            }
-            KeyCode::Backspace => {
+            KeyCode::Left | KeyCode::Backspace => {
                 if state.file_picker.filter.is_empty() {
                     state.file_picker.go_up();
                 } else {
@@ -751,25 +733,13 @@ fn spawn_list_objects(
     let prefix = prefix.to_string();
     let cache_path = cache_path.to_path_buf();
     tokio::spawn(async move {
-        let result = match S3Client::from_client(client, "")
+        let result = match S3Client::from_client(client)
             .list_objects(&bucket, &prefix)
             .await
         {
             Ok(remote) => {
-                // Keep the cache in sync: write the remote listing only when it
-                // differs from what we already have locally.
                 if let Ok(db) = ObjectCache::open(&cache_path) {
-                    match db.get_prefix(&bucket, &prefix) {
-                        Ok(Some(local)) => {
-                            if !listings_match(&local, &remote) {
-                                let _ = db.set_prefix(&bucket, &prefix, &remote);
-                            }
-                        }
-                        Ok(None) => {
-                            let _ = db.set_prefix(&bucket, &prefix, &remote);
-                        }
-                        Err(_) => {}
-                    }
+                    let _ = db.sync_listing(&bucket, &prefix, &remote);
                 }
                 Ok(remote)
             }
@@ -797,12 +767,10 @@ fn spawn_upload_many(
     let prefix = prefix.to_string();
     let cache_path = cache_path.to_path_buf();
     tokio::spawn(async move {
-        let report = S3Client::from_client(client, "")
+        let report = S3Client::from_client(client)
             .upload_files(&bucket, &prefix, &files)
             .await;
 
-        // Register every successful upload in the object cache so the next
-        // listing shows it without hitting S3.
         if let Ok(db) = ObjectCache::open(&cache_path) {
             let uploaded: std::collections::HashSet<String> = report
                 .uploaded
@@ -841,7 +809,7 @@ fn spawn_download(
     let key = key.to_string();
     let dest_path = dest_path.to_string();
     tokio::spawn(async move {
-        let result = match S3Client::from_client(client, "")
+        let result = match S3Client::from_client(client)
             .download_file(&bucket, &key, &dest_path)
             .await
         {
@@ -865,7 +833,7 @@ fn spawn_download_many(
     let keys: Vec<String> = keys.to_vec();
     let dest_dir = dest_dir.to_string();
     tokio::spawn(async move {
-        let report = S3Client::from_client(client, "")
+        let report = S3Client::from_client(client)
             .download_objects(&bucket, &keys, &dest_dir)
             .await;
         let _ = tx.send(TaskMessage::ObjectsDownloaded { result: Ok(report) });
@@ -883,7 +851,7 @@ fn spawn_get_object_info(
     let bucket = bucket.to_string();
     let key = key.to_string();
     tokio::spawn(async move {
-        let result = match S3Client::from_client(client, "")
+        let result = match S3Client::from_client(client)
             .get_object_info(&bucket, &key)
             .await
         {
@@ -957,13 +925,12 @@ mod picker_flow_smoke {
         }
 
         let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
-        let mut state = AppState::new("us-east-1".to_string());
+        let mut state = AppState::new();
         state.current_panel = Panel::Objects;
         state.current_bucket = Some(bucket.to_string());
         state.input_mode = InputMode::FilePicker;
         state.file_picker = crate::filepicker::FilePicker::new_at(dir.clone());
 
-        // one.txt is entries[1], two.txt is entries[2].
         state.file_picker.selected_index = 1;
         handle_input_key(
             &mut state,
@@ -988,9 +955,6 @@ mod picker_flow_smoke {
             "space marks two files"
         );
 
-        // 'u' now opens the metadata editor; build one entry with the table
-        // keys (A → add row, type into key, Enter, type into value, Enter),
-        // then upload with uppercase 'U'.
         handle_input_key(
             &mut state,
             KeyCode::Char('u'),
@@ -1165,13 +1129,12 @@ mod picker_flow_smoke {
         }
 
         let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
-        let mut state = AppState::new("us-east-1".to_string());
+        let mut state = AppState::new();
         state.current_panel = Panel::Objects;
         state.current_bucket = Some(bucket.to_string());
         state.input_mode = InputMode::FilePicker;
         state.file_picker = crate::filepicker::FilePicker::new_at(base.clone());
 
-        // entries are ["..", "docs"]; mark the whole tree with Space.
         state.file_picker.selected_index = 1;
         handle_input_key(
             &mut state,
@@ -1357,20 +1320,18 @@ mod picker_flow_smoke {
                 .await
                 .expect("seed object");
         }
-        // Load the seeded list into the app state, as loading a bucket would.
         let seeded = s3_client
             .list_objects(bucket, "")
             .await
             .expect("objects listed");
 
         let (task_tx, mut task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
-        let mut state = AppState::new("us-east-1".to_string());
+        let mut state = AppState::new();
         state.current_panel = Panel::Objects;
         state.current_bucket = Some(bucket.to_string());
         state.input_mode = InputMode::None;
         state.objects = seeded;
 
-        // Mark every visible object and delete the whole selection.
         handle_key(
             &mut state,
             KeyCode::Char('a'),
@@ -1419,6 +1380,7 @@ mod picker_flow_smoke {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+
         let deleted = deleted
             .expect("delete task reported back")
             .unwrap_or_else(|e| panic!("batch delete failed: {e}"));

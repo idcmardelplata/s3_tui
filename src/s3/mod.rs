@@ -7,41 +7,63 @@ use crate::app::{
 };
 use crate::config::StaticCredentials;
 
+macro_rules! map_storage_class {
+    ($sc:expr, $ty:path, $($variant:ident => $sc_ident:ident),+ $(,)?) => {
+        match $sc {
+            $(<$ty>::$variant => StorageClass::$sc_ident,)+
+            other => StorageClass::Unknown(other.as_str().to_string()),
+        }
+    };
+}
+
 fn map_storage_class(sc: &aws_sdk_s3::types::ObjectStorageClass) -> StorageClass {
-    use aws_sdk_s3::types::ObjectStorageClass as Aws;
-    match sc {
-        Aws::Standard => StorageClass::Standard,
-        Aws::ReducedRedundancy => StorageClass::ReducedRedundancy,
-        Aws::IntelligentTiering => StorageClass::IntelligentTiering,
-        Aws::Glacier => StorageClass::Glacier,
-        Aws::GlacierIr => StorageClass::GlacierIr,
-        Aws::StandardIa => StorageClass::StandardIa,
-        Aws::OnezoneIa => StorageClass::OneZoneIa,
-        Aws::ExpressOnezone => StorageClass::ExpressOnezone,
-        Aws::Outposts => StorageClass::Outposts,
-        Aws::DeepArchive => StorageClass::DeepArchive,
-        Aws::Snow => StorageClass::Snow,
-        other => StorageClass::Unknown(other.as_str().to_string()),
-    }
+    map_storage_class!(
+        sc,
+        aws_sdk_s3::types::ObjectStorageClass,
+        Standard => Standard,
+        ReducedRedundancy => ReducedRedundancy,
+        IntelligentTiering => IntelligentTiering,
+        Glacier => Glacier,
+        GlacierIr => GlacierIr,
+        StandardIa => StandardIa,
+        OnezoneIa => OneZoneIa,
+        ExpressOnezone => ExpressOnezone,
+        Outposts => Outposts,
+        DeepArchive => DeepArchive,
+        Snow => Snow,
+    )
+}
+
+fn map_head_storage_class(sc: &aws_sdk_s3::types::StorageClass) -> StorageClass {
+    map_storage_class!(
+        sc,
+        aws_sdk_s3::types::StorageClass,
+        Standard => Standard,
+        ReducedRedundancy => ReducedRedundancy,
+        IntelligentTiering => IntelligentTiering,
+        Glacier => Glacier,
+        GlacierIr => GlacierIr,
+        StandardIa => StandardIa,
+        OnezoneIa => OneZoneIa,
+        ExpressOnezone => ExpressOnezone,
+        Outposts => Outposts,
+        DeepArchive => DeepArchive,
+        Snow => Snow,
+    )
 }
 
 pub struct S3Client {
     pub client: Client,
-    pub region: String,
 }
 
 impl S3Client {
-    pub fn from_client(client: Client, region: &str) -> Self {
-        Self {
-            client,
-            region: region.to_string(),
-        }
+    pub fn from_client(client: Client) -> Self {
+        Self { client }
     }
 
-    /// Build a client from fully resolved settings. Credentials kept explicit:
-    /// static credentials (from CLI or config) and named profiles replace the
-    /// standard credential chain; otherwise the chain (env vars, shared config
-    /// file, IAM roles, ...) is used as-is.
+    /// Build a client from fully resolved settings. Static credentials and
+    /// named profiles replace the standard credential chain; otherwise the
+    /// chain (env vars, shared config file, IAM roles, ...) is used as-is.
     pub async fn new(
         region: &str,
         endpoint: Option<&str>,
@@ -81,10 +103,7 @@ impl S3Client {
         }
 
         let client = Client::from_conf(s3_builder.build());
-        Ok(Self {
-            client,
-            region: region.to_string(),
-        })
+        Ok(Self { client })
     }
 
     pub async fn list_buckets(&self) -> Result<Vec<BucketInfo>> {
@@ -95,7 +114,7 @@ impl S3Client {
             .await
             .context("error al listar los buckets de S3")?;
 
-        let buckets = response
+        Ok(response
             .buckets()
             .iter()
             .map(|b| BucketInfo {
@@ -105,11 +124,8 @@ impl S3Client {
                     let nanos = d.subsec_nanos();
                     DateTime::from_timestamp(secs, nanos)
                 }),
-                region: self.region.clone(),
             })
-            .collect();
-
-        Ok(buckets)
+            .collect())
     }
 
     pub async fn list_objects(&self, bucket: &str, prefix: &str) -> Result<Vec<ObjectInfo>> {
@@ -133,7 +149,6 @@ impl S3Client {
 
         let mut objects = Vec::new();
 
-        // Add folders (common prefixes)
         for p in response.common_prefixes() {
             if let Some(path) = p.prefix() {
                 let name = path
@@ -152,10 +167,8 @@ impl S3Client {
             }
         }
 
-        // Add files
         for obj in response.contents() {
             if let Some(key) = obj.key() {
-                // Skip the prefix itself if it's a "folder marker"
                 if key == full_prefix.as_str() {
                     continue;
                 }
@@ -199,14 +212,15 @@ impl S3Client {
     pub async fn delete_objects(&self, bucket: &str, keys: &[String]) -> Result<Vec<String>> {
         use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 
-        let mut objects = Vec::with_capacity(keys.len());
-        for key in keys {
-            let id = ObjectIdentifier::builder()
-                .key(key)
-                .build()
-                .with_context(|| format!("invalid object key {key}"))?;
-            objects.push(id);
-        }
+        let objects: Vec<ObjectIdentifier> = keys
+            .iter()
+            .map(|key| {
+                ObjectIdentifier::builder()
+                    .key(key)
+                    .build()
+                    .with_context(|| format!("invalid object key {key}"))
+            })
+            .collect::<Result<_>>()?;
         let delete = Delete::builder()
             .set_objects(Some(objects))
             .build()
@@ -237,7 +251,7 @@ impl S3Client {
         Ok(keys.to_vec())
     }
 
-    /// Upload a single local file into `prefix` at the key `prefix + key_suffix`,
+    /// Upload a single local file into `prefix` at `prefix + key_suffix`,
     /// attaching `metadata` when present. Returns the full S3 key.
     pub async fn upload_file(
         &self,
@@ -265,11 +279,8 @@ impl S3Client {
         Ok(key)
     }
 
-    /// Upload several local files (or whole directory trees) into `prefix`,
-    /// keying each by its file name — or by its path relative to the selected
-    /// directory when the selection is a folder — and attaching its per-file
-    /// metadata. Returns a per-file report so partial failures don't abort the
-    /// batch.
+    /// Upload several local files (or whole directory trees) into `prefix`.
+    /// Returns a per-file report so partial failures don't abort the batch.
     pub async fn upload_files(
         &self,
         bucket: &str,
@@ -383,28 +394,8 @@ impl S3Client {
     }
 }
 
-fn map_head_storage_class(sc: &aws_sdk_s3::types::StorageClass) -> StorageClass {
-    use aws_sdk_s3::types::StorageClass as Aws;
-    match sc {
-        Aws::Standard => StorageClass::Standard,
-        Aws::ReducedRedundancy => StorageClass::ReducedRedundancy,
-        Aws::IntelligentTiering => StorageClass::IntelligentTiering,
-        Aws::Glacier => StorageClass::Glacier,
-        Aws::GlacierIr => StorageClass::GlacierIr,
-        Aws::StandardIa => StorageClass::StandardIa,
-        Aws::OnezoneIa => StorageClass::OneZoneIa,
-        Aws::ExpressOnezone => StorageClass::ExpressOnezone,
-        Aws::Outposts => StorageClass::Outposts,
-        Aws::DeepArchive => StorageClass::DeepArchive,
-        Aws::Snow => StorageClass::Snow,
-        other => StorageClass::Unknown(other.as_str().to_string()),
-    }
-}
-
-/// Statically walk `root`, collecting every file (recursing into subdirectories)
-/// as `(local_path, key)` where `key` is the path relative to the selected
-/// top-level directory. Symlinks are treated as files. The whole subtree is
-/// accumulated into `out` and sorted by key for a deterministic order.
+/// Statically walk `root`, collecting every file as `(local_path, key)` relative
+/// to the selected top-level directory. Symlinks are treated as files.
 fn collect_dir_files(
     root: &std::path::Path,
     base_key: &str,
@@ -432,16 +423,9 @@ fn collect_dir_files(
 /// A single upload unit: (local path, S3 key suffix, per-file metadata).
 pub type UploadSource = (std::path::PathBuf, String, Vec<(String, String)>);
 
-// Flatten a selection of local paths into the `(local_path, key, metadata)`
-// units the uploader consumes.
-//
-// - A plain file keeps its file name as the key suffix.
-// - A directory is walked recursively; each file under it keeps the path
-//   relative to the selected folder (`folder/a/b.txt`), inheriting the
-//   metadata of the directory entry. Empty directories contribute nothing.
-//
-// The order is: selection order first, then each directory's files sorted by
-// key for a deterministic listing.
+/// Flatten a selection of local paths into upload units. A plain file keeps
+/// its file name as the key suffix; a directory is walked recursively so each
+/// file keeps the path relative to the selected folder, inheriting its metadata.
 pub fn expand_upload_sources(
     selections: &[(std::path::PathBuf, Vec<(String, String)>)],
 ) -> Vec<UploadSource> {

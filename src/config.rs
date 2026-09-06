@@ -2,29 +2,18 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// Default endpoint used when neither the config file nor `S3_ENDPOINT` are set.
-/// An empty string means "use the standard AWS regional endpoint".
 pub const DEFAULT_ENDPOINT: &str = "";
-/// Default region used when neither the config file nor `AWS_REGION` are set.
 pub const DEFAULT_REGION: &str = "us-east-1";
 
 /// Application configuration loaded from `$HOME/.config/s3-tui/config.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AwsConfig {
-    /// AWS region (overridable via `AWS_REGION`).
     pub region: Option<String>,
-    /// S3 endpoint. Most useful for LocalStack / S3-compatible services.
-    /// Overridable via `S3_ENDPOINT`.
     pub endpoint: Option<String>,
-    /// Named profile from `~/.aws/credentials` to use.
     pub profile: Option<String>,
-    /// Use path-style URLs (defaults to `true` whenever an endpoint is set).
     pub force_path_style: Option<bool>,
-    /// Static credentials. When omitted, the standard AWS credential chain is
-    /// used (env, `~/.aws/credentials`, profiles, etc.).
     pub credentials: Option<StaticCredentials>,
-    /// UI preferences.
     pub ui: Option<UiConfig>,
 }
 
@@ -32,8 +21,7 @@ pub struct AwsConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
-    /// `ratatui-themekit` theme ID (e.g. `"catppuccin"`, `"dracula"`).
-    /// Overridable via `S3TUI_THEME`; `NO_COLOR` disables colours entirely.
+    /// Theme ID used when not overridden by `S3TUI_THEME` / `NO_COLOR`.
     pub theme: Option<String>,
 }
 
@@ -64,15 +52,13 @@ impl AwsConfig {
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
     }
 
-    /// Theme ID from the config file (`[ui] theme`), if set. Environment
-    /// variables take precedence and are handled by the theme module.
+    /// Theme ID from the config file (`[ui] theme`), if set.
     pub fn effective_theme(&self) -> Option<String> {
         self.ui.as_ref().and_then(|ui| ui.theme.clone())
     }
 }
 
-/// Default TOML written on first run: standard AWS defaults that use the
-/// regular regional endpoint and the standard credential chain.
+/// Default TOML written on first run: standard AWS defaults.
 pub const DEFAULT_CONFIG_TOML: &str = r#"# s3-tui configuration
 #
 # Every value can also be given from the command line (--region, --endpoint,
@@ -124,8 +110,8 @@ pub fn ensure_default_config() -> Result<bool> {
     Ok(true)
 }
 
-/// Load the TOML config. A missing file yields the default (empty) config; a
-/// malformed file is reported as an error so typos are not silently ignored.
+/// Load the TOML config. A missing file yields the default config; a malformed
+/// file is reported as an error so typos are not silently ignored.
 pub fn load() -> Result<AwsConfig> {
     let path = config_file_path();
     if !path.exists() {
@@ -207,7 +193,6 @@ session_token = "token"
         let path = home.join(".config/s3-tui/config.toml");
         let _ = std::fs::remove_dir_all(&home);
 
-        // Temporarily point $HOME at the temp dir and exercise the function.
         unsafe {
             std::env::set_var("HOME", &home);
         }

@@ -59,10 +59,7 @@ pub struct ResolvedSettings {
 }
 
 impl ResolvedSettings {
-    /// Resolve every connection setting from CLI flags, environment variables
-    /// and the config file (in that order of precedence).
     pub fn from_parts(cli: &Cli, cfg: &AwsConfig) -> Self {
-        // `effective_endpoint()` already resolves `S3_ENDPOINT` > config > default.
         let endpoint = cli
             .endpoint
             .clone()

@@ -10,11 +10,10 @@ pub struct FileEntry {
 }
 
 /// Popup file browser used to pick one or more local files (or whole
-/// directories, uploaded as their full tree) to upload.
-///
-/// Browsing keeps an explicit `selection` of full paths so items chosen in
-/// different directories can be uploaded together. A fuzzy `filter` matches
-/// entry names by subsequence and ranks the results by relevance.
+/// directories, uploaded as their full tree) to upload. Browsing keeps an
+/// explicit `selection` of full paths so items chosen in different directories
+/// can be uploaded together; a fuzzy `filter` matches entry names by
+/// subsequence and ranks the results by relevance.
 #[derive(Debug, Clone)]
 pub struct FilePicker {
     /// Directory currently listed.
@@ -39,7 +38,6 @@ impl FilePicker {
         Self::new_at(dir)
     }
 
-    /// Open the picker in `dir`.
     pub fn new_at(dir: PathBuf) -> Self {
         let mut picker = Self {
             dir,
@@ -161,9 +159,8 @@ impl FilePicker {
             .map(|&i| &self.entries[i])
     }
 
-    /// Add/remove the highlighted file or directory from the upload selection
-    /// (a directory uploads its whole tree). The `..` parent marker is ignored.
-    /// Returns `true` if the entry is currently selected.
+    /// Add/remove the highlighted file or directory from the upload selection.
+    /// The `..` parent marker is ignored. Returns `true` when currently selected.
     pub fn toggle_selected(&mut self) -> bool {
         let Some(entry) = self.selected_entry().cloned() else {
             return false;
@@ -180,8 +177,7 @@ impl FilePicker {
         }
     }
 
-    /// Add every visible entry (files and subdirectories, but not the `..`
-    /// parent marker) to the selection.
+    /// Add every visible entry (but not the `..` parent marker) to the selection.
     pub fn select_all_visible(&mut self) {
         for idx in self.visible_indices() {
             let entry = &self.entries[idx];
@@ -270,12 +266,12 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<u32> {
         };
         if c == qc {
             if i as i32 == last_match + 1 {
-                score += 3; // consecutive bonus
+                score += 3;
             } else {
                 score += 1;
             }
             if i == 0 || !t[i - 1].is_alphanumeric() {
-                score += 2; // word-start bonus
+                score += 2;
             }
             last_match = i as i32;
             query_idx += 1;
@@ -307,7 +303,6 @@ mod tests {
         let picker = FilePicker::new_at(tmp.clone());
         assert_eq!(picker.entries[0].name, "..");
         let names: Vec<&str> = picker.entries.iter().map(|e| e.name.as_str()).collect();
-        // directories before files, each group alphabetical
         assert_eq!(names, vec!["..", "sub", "alpha.log", "appa.txt"]);
         assert!(picker.entries[0].is_dir);
         assert_eq!(picker.visible_count(), 4);
@@ -354,7 +349,7 @@ mod tests {
         fs::write(tmp.join("b.log"), "x").unwrap();
 
         let mut picker = FilePicker::new_at(tmp.clone());
-        picker.selected_index = 1; // a.txt (idx 0 is "..")
+        picker.selected_index = 1;
 
         assert!(picker.toggle_selected(), "added");
         assert_eq!(picker.selection_count(), 1);
@@ -376,18 +371,15 @@ mod tests {
 
         let mut picker = FilePicker::new_at(tmp.clone());
 
-        // ".." (idx 0) can never be part of the selection.
         picker.selected_index = 0;
         assert!(!picker.toggle_selected(), "parent marker is ignored");
 
-        // A directory toggles like a file (its tree is expanded at upload).
-        picker.selected_index = 1; // "docs"
+        picker.selected_index = 1;
         assert!(picker.toggle_selected(), "directory added");
         assert_eq!(picker.selection_count(), 1);
         assert!(!picker.toggle_selected(), "directory removed");
         assert_eq!(picker.selection_count(), 0);
 
-        // "a" selects files and directories, but not the parent marker.
         picker.select_all_visible();
         assert_eq!(picker.selection_count(), 2);
         assert!(picker.selection.iter().any(|p| p == &tmp.join("docs")));
@@ -402,7 +394,7 @@ mod tests {
         fs::write(tmp.join("sub/file.txt"), "x").unwrap();
 
         let mut picker = FilePicker::new_at(tmp.clone());
-        picker.selected_index = 1; // "sub"
+        picker.selected_index = 1;
         assert!(picker.enter());
         assert_eq!(picker.dir, tmp.join("sub"));
         assert!(picker.entries.iter().any(|e| e.name == "file.txt"));
@@ -417,7 +409,6 @@ mod tests {
     fn load_failure_sets_hint() {
         let missing = temp_dir("missing").join("nope");
         let picker = FilePicker::new_at(missing);
-        // The ".." parent marker is still available to escape an unreadable dir.
         assert_eq!(picker.entries.len(), 1);
         assert_eq!(picker.entries[0].name, "..");
         assert!(!picker.hint.is_empty());
