@@ -1,6 +1,6 @@
 [package]
 name = "s3_tui"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2024"
 description = "A terminal UI manager for AWS S3"
 license = "MIT"

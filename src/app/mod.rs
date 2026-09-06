@@ -353,6 +353,10 @@ pub struct AppState {
     pub show_help: bool,
     /// Scroll offset used inside the help panel.
     pub help_scroll: usize,
+    /// The `(bucket, prefix)` listing currently being fetched from S3.
+    /// Stale `ObjectsLoaded` messages that do not match it are ignored, so a
+    /// slow response for an earlier bucket cannot overwrite the current view.
+    pub pending_list: Option<(String, String)>,
 }
 
 impl AppState {
@@ -379,6 +383,7 @@ impl AppState {
             metadata_editor: MetadataEditor::default(),
             show_help: false,
             help_scroll: 0,
+            pending_list: None,
         }
     }
 
@@ -453,6 +458,7 @@ impl AppState {
             self.current_bucket = Some(name.clone());
             self.current_prefix.clear();
             self.objects.clear();
+            self.pending_list = None;
             self.selected_index = 0;
             self.selected_keys.clear();
             self.current_panel = Panel::Objects;
@@ -470,6 +476,7 @@ impl AppState {
             if obj.is_folder {
                 self.current_prefix = key.clone();
                 self.objects.clear();
+                self.pending_list = None;
                 self.selected_index = 0;
                 self.selected_keys.clear();
                 self.status_message = format!(
@@ -487,10 +494,15 @@ impl AppState {
         match self.current_panel {
             Panel::Objects => {
                 if self.current_prefix.is_empty() {
+                    let last_bucket = self.current_bucket.clone();
                     self.current_panel = Panel::Buckets;
                     self.current_bucket = None;
                     self.objects.clear();
-                    self.selected_index = 0;
+                    self.pending_list = None;
+                    self.selected_index = last_bucket
+                        .as_ref()
+                        .and_then(|b| self.buckets.iter().position(|x| &x.name == b))
+                        .unwrap_or(0);
                     self.selected_keys.clear();
                     self.status_message = String::from("Presioná ? para la ayuda");
                     None
@@ -502,6 +514,7 @@ impl AppState {
                         self.current_prefix.clear();
                     }
                     self.objects.clear();
+                    self.pending_list = None;
                     self.selected_index = 0;
                     self.selected_keys.clear();
                     self.status_message = format!(
