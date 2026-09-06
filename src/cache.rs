@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::app::ObjectInfo;
+use crate::app::{ObjectInfo, StorageClass};
 
 pub const CACHE_DIR_NAME: &str = "s3-tui";
 pub const CACHE_DB_NAME: &str = "cache.db";
@@ -183,10 +183,13 @@ impl ObjectCache {
         bucket: &str,
         key: &str,
         size: u64,
-        metadata: &[(&str, &str)],
+        storage_class: &StorageClass,
     ) -> Result<()> {
         let prefix = object_prefix(key);
-        let sc = if metadata.is_empty() { "" } else { "STANDARD" };
+        let sc = match storage_class {
+            StorageClass::Folder => String::new(),
+            other => other.to_string(),
+        };
         self.conn
             .execute(
                 "INSERT INTO objects (bucket, prefix, key, size, last_modified, is_folder, storage_class)
@@ -235,26 +238,28 @@ fn object_prefix(key: &str) -> String {
 }
 
 /// True when a cached folder listing exactly matches a remote one, i.e. they
-/// have the same objects (order-insensitive).
+/// have the same objects (order-insensitive) including storage class.
 pub fn listings_match(local: &[ObjectInfo], remote: &[ObjectInfo]) -> bool {
     if local.len() != remote.len() {
         return false;
     }
-    let local: HashSet<(&str, Option<u64>, i64)> = local
+    let local: HashSet<(String, Option<u64>, i64, String)> = local
         .iter()
         .map(|o| {
             (
-                o.key.as_str(),
+                o.key.clone(),
                 o.size,
                 o.last_modified.map(|d| d.timestamp()).unwrap_or(0),
+                o.storage_class.to_string(),
             )
         })
         .collect();
     remote.iter().all(|o| {
         local.contains(&(
-            o.key.as_str(),
+            o.key.clone(),
             o.size,
             o.last_modified.map(|d| d.timestamp()).unwrap_or(0),
+            o.storage_class.to_string(),
         ))
     })
 }
@@ -320,11 +325,21 @@ mod tests {
         let cache = temp_db("up");
         let prefix = "dir/";
         cache
-            .upsert_object("b", "dir/file.log", 42, &[("env", "prod")])
+            .upsert_object("b", "dir/file.log", 42, &StorageClass::Standard)
             .unwrap();
         let got = cache.get_prefix("b", prefix).unwrap().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].key, "dir/file.log");
+    }
+
+    #[test]
+    fn upload_preserves_chosen_storage_class() {
+        let cache = temp_db("sc");
+        cache
+            .upsert_object("b", "dir/file.log", 42, &StorageClass::Glacier)
+            .unwrap();
+        let got = cache.get_prefix("b", "dir/").unwrap().unwrap();
+        assert_eq!(got[0].storage_class.to_string(), "GLACIER");
     }
 
     #[test]
@@ -350,6 +365,19 @@ mod tests {
         let mut changed = b.clone();
         changed[0].size = Some(99);
         assert!(!listings_match(&a, &changed));
+    }
+
+    #[test]
+    fn listings_match_detects_storage_class_changes() {
+        let mut remote = vec![object("x", Some(1), true)];
+        let mut cached = vec![object("x", Some(1), true)];
+        cached[0].storage_class = StorageClass::Glacier;
+        assert!(
+            !listings_match(&cached, &remote),
+            "storage class changed but seeds claim the listings match"
+        );
+        remote[0].storage_class = StorageClass::Glacier;
+        assert!(listings_match(&cached, &remote));
     }
 
     #[test]

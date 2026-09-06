@@ -7,7 +7,10 @@ mod s3;
 mod ui;
 
 use anyhow::{Context, Result};
-use app::{AppState, InputMode, LoadingState, MetadataField, Panel, PendingAction, TaskMessage};
+use app::{
+    AppState, InputMode, LoadingState, MetadataField, Panel, PendingAction, StorageClass,
+    TaskMessage,
+};
 use cache::ObjectCache;
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -162,7 +165,13 @@ fn handle_task_message(
                 }
                 Err(e) => state.status_message = format!("Error al subir: {e}"),
             }
-            state.loading_state = LoadingState::Idle;
+            if let Some(bucket) = state.current_bucket.as_deref() {
+                let prefix = state.current_prefix.clone();
+                spawn_list_objects(s3_client, task_tx, cache_path, bucket, &prefix);
+                state.loading_state = LoadingState::Loading("Actualizando...".to_string());
+            } else {
+                state.loading_state = LoadingState::Idle;
+            }
         }
         TaskMessage::ObjectDownloaded { result } => {
             match result {
@@ -601,14 +610,36 @@ async fn handle_input_key(
                     state.status_message = "No marcaste archivos para subir".to_string();
                 } else if let Some(bucket) = state.current_bucket.clone() {
                     let prefix = state.current_prefix.clone();
+                    let storage_class = state.metadata_editor.storage_class.clone();
                     let n = files.len();
                     state.cancel_input();
                     state.loading_state =
                         LoadingState::Loading(format!("Subiendo {n} archivo(s)..."));
-                    spawn_upload_many(s3_client, task_tx, cache_path, &bucket, &prefix, files);
+                    spawn_upload_many(
+                        s3_client,
+                        task_tx,
+                        cache_path,
+                        &bucket,
+                        &prefix,
+                        files,
+                        storage_class,
+                    );
                 } else {
                     state.status_message = "Seleccioná un bucket primero".to_string();
                 }
+            }
+            KeyCode::Char('C') => {
+                state.metadata_editor.commit_cell(&state.input_buffer);
+                state.input_buffer.clear();
+                state.metadata_editor.storage_class_index = StorageClass::uploadable()
+                    .iter()
+                    .position(|sc| *sc == state.metadata_editor.storage_class)
+                    .unwrap_or(0);
+                state.input_mode = InputMode::StorageClass;
+                state.status_message = format!(
+                    "Elegí la clase de almacenamiento (actual: {}) · ↑↓:elegir · Enter:confirmar · Esc:cancelar",
+                    state.metadata_editor.storage_class
+                );
             }
             KeyCode::Esc => {
                 if !state.input_buffer.is_empty() {
@@ -623,6 +654,35 @@ async fn handle_input_key(
             KeyCode::Char(c) => state.input_buffer.push(c),
             KeyCode::Backspace => {
                 state.input_buffer.pop();
+            }
+            _ => {}
+        },
+        InputMode::StorageClass => match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.metadata_editor.storage_class_index > 0 {
+                    state.metadata_editor.storage_class_index -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let opts = StorageClass::uploadable();
+                if state.metadata_editor.storage_class_index + 1 < opts.len() {
+                    state.metadata_editor.storage_class_index += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let opts = StorageClass::uploadable();
+                if let Some(sc) = opts.get(state.metadata_editor.storage_class_index) {
+                    state.metadata_editor.storage_class = sc.clone();
+                }
+                state.input_mode = InputMode::Metadata;
+                state.status_message = format!(
+                    "Clase de almacenamiento: {}",
+                    state.metadata_editor.storage_class
+                );
+            }
+            KeyCode::Esc => {
+                state.input_mode = InputMode::Metadata;
+                state.status_message = "Clase sin cambios".to_string();
             }
             _ => {}
         },
@@ -760,6 +820,7 @@ fn spawn_upload_many(
     bucket: &str,
     prefix: &str,
     files: Vec<(PathBuf, Vec<(String, String)>)>,
+    storage_class: StorageClass,
 ) {
     let tx = task_tx.clone();
     let client = s3_client.client.clone();
@@ -768,7 +829,7 @@ fn spawn_upload_many(
     let cache_path = cache_path.to_path_buf();
     tokio::spawn(async move {
         let report = S3Client::from_client(client)
-            .upload_files(&bucket, &prefix, &files)
+            .upload_files(&bucket, &prefix, &files, &storage_class)
             .await;
 
         if let Ok(db) = ObjectCache::open(&cache_path) {
@@ -778,17 +839,13 @@ fn spawn_upload_many(
                 .filter_map(|s| s.strip_prefix(&format!("{bucket}/")))
                 .map(str::to_string)
                 .collect();
-            for (path, key_suffix, metadata) in crate::s3::expand_upload_sources(&files) {
+            for (path, key_suffix, _) in crate::s3::expand_upload_sources(&files) {
                 let key = format!("{prefix}{key_suffix}");
                 if !uploaded.contains(&key) {
                     continue;
                 }
                 let size = std::fs::metadata(&path).ok().map(|m| m.len()).unwrap_or(0);
-                let meta: Vec<(&str, &str)> = metadata
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                let _ = db.upsert_object(&bucket, &key, size, &meta);
+                let _ = db.upsert_object(&bucket, &key, size, &storage_class);
             }
         }
 
@@ -1079,6 +1136,61 @@ mod picker_flow_smoke {
         eprintln!(
             "FLOW OK: {report:?} meta.env={meta} info.metadata={:?}",
             detail.metadata
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_class_picker_opens_and_applies() {
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .region(aws_config::Region::new("us-east-1"))
+                .behavior_version_latest()
+                .build(),
+        );
+        let s3_client = S3Client::from_client(client);
+        let cache_path = temp_cache();
+        let (task_tx, _task_rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
+
+        let mut state = AppState::new();
+        state.input_mode = InputMode::Metadata;
+        state.metadata_editor =
+            crate::app::MetadataEditor::from_paths(vec![std::path::PathBuf::from("/tmp/a.txt")]);
+
+        handle_input_key(
+            &mut state,
+            KeyCode::Char('C'),
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
+        assert_eq!(
+            state.input_mode,
+            InputMode::StorageClass,
+            "C opens the storage class picker"
+        );
+        assert_eq!(state.metadata_editor.storage_class, StorageClass::Standard);
+
+        for _ in 0..4 {
+            handle_input_key(&mut state, KeyCode::Down, &s3_client, &task_tx, &cache_path).await;
+        }
+        handle_input_key(
+            &mut state,
+            KeyCode::Enter,
+            &s3_client,
+            &task_tx,
+            &cache_path,
+        )
+        .await;
+        assert_eq!(
+            state.input_mode,
+            InputMode::Metadata,
+            "Enter returns to the metadata editor"
+        );
+        assert_eq!(
+            state.metadata_editor.storage_class,
+            StorageClass::Glacier,
+            "scrolling 4 options reaches GLACIER"
         );
     }
 

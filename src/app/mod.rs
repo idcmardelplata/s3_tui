@@ -25,9 +25,10 @@ pub struct BucketInfo {
     pub creation_date: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StorageClass {
     Folder,
+    #[default]
     Standard,
     ReducedRedundancy,
     IntelligentTiering,
@@ -63,6 +64,22 @@ impl std::fmt::Display for StorageClass {
     }
 }
 
+impl StorageClass {
+    /// Storage classes a batch upload can write objects with, in display order.
+    pub fn uploadable() -> Vec<StorageClass> {
+        vec![
+            StorageClass::Standard,
+            StorageClass::StandardIa,
+            StorageClass::IntelligentTiering,
+            StorageClass::OneZoneIa,
+            StorageClass::Glacier,
+            StorageClass::GlacierIr,
+            StorageClass::DeepArchive,
+            StorageClass::ReducedRedundancy,
+        ]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjectInfo {
     pub key: String,
@@ -80,6 +97,7 @@ pub enum InputMode {
     Metadata,
     Directory,
     Filter,
+    StorageClass,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +140,10 @@ pub struct MetadataEditor {
     pub selected: usize,
     pub row: usize,
     pub field: MetadataField,
+    /// Storage class applied to every object of the batch upload.
+    pub storage_class: StorageClass,
+    /// Cursor index inside the storage-class picker popup.
+    pub storage_class_index: usize,
 }
 
 impl MetadataEditor {
@@ -131,6 +153,8 @@ impl MetadataEditor {
             selected: 0,
             row: 0,
             field: MetadataField::Key,
+            storage_class: StorageClass::Standard,
+            storage_class_index: 0,
         }
     }
 
@@ -612,5 +636,22 @@ mod tests {
         ed.advance_after_value();
         assert_eq!(ed.entries_len(), rows, "empty row does not create another");
         assert!(ed.cursor_row_is_empty());
+    }
+
+    #[test]
+    fn metadata_editor_defaults_to_standard_storage_class() {
+        let ed = MetadataEditor::from_paths(vec![PathBuf::from("/tmp/a.txt")]);
+        assert_eq!(
+            ed.storage_class,
+            StorageClass::Standard,
+            "uploads start on STANDARD"
+        );
+        assert_eq!(ed.storage_class_index, 0);
+        assert!(
+            StorageClass::uploadable()
+                .iter()
+                .any(|sc| *sc == ed.storage_class),
+            "default class is in the picker list"
+        );
     }
 }

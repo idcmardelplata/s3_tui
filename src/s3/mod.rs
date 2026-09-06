@@ -52,6 +52,26 @@ fn map_head_storage_class(sc: &aws_sdk_s3::types::StorageClass) -> StorageClass 
     )
 }
 
+/// Convert an upload-side storage class into the SDK type. Returns `None` for
+/// classes that cannot be requested on a `PutObject` (folders, unknown values).
+fn to_sdk_storage_class(sc: &StorageClass) -> Option<aws_sdk_s3::types::StorageClass> {
+    use aws_sdk_s3::types::StorageClass as Sdk;
+    match sc {
+        StorageClass::Standard => Some(Sdk::Standard),
+        StorageClass::ReducedRedundancy => Some(Sdk::ReducedRedundancy),
+        StorageClass::IntelligentTiering => Some(Sdk::IntelligentTiering),
+        StorageClass::Glacier => Some(Sdk::Glacier),
+        StorageClass::GlacierIr => Some(Sdk::GlacierIr),
+        StorageClass::StandardIa => Some(Sdk::StandardIa),
+        StorageClass::OneZoneIa => Some(Sdk::OnezoneIa),
+        StorageClass::ExpressOnezone => Some(Sdk::ExpressOnezone),
+        StorageClass::DeepArchive => Some(Sdk::DeepArchive),
+        StorageClass::Outposts => Some(Sdk::Outposts),
+        StorageClass::Snow => Some(Sdk::Snow),
+        _ => None,
+    }
+}
+
 pub struct S3Client {
     pub client: Client,
 }
@@ -260,6 +280,7 @@ impl S3Client {
         key_suffix: &str,
         local_path: &str,
         metadata: &[(String, String)],
+        storage_class: &StorageClass,
     ) -> Result<String> {
         let key = format!("{prefix}{key_suffix}");
 
@@ -272,6 +293,9 @@ impl S3Client {
             let map: std::collections::HashMap<String, String> = metadata.iter().cloned().collect();
             put = put.set_metadata(Some(map));
         }
+        if let Some(sc) = to_sdk_storage_class(storage_class) {
+            put = put.storage_class(sc);
+        }
         put.send()
             .await
             .with_context(|| format!("error al subir a s3://{bucket}/{key}"))?;
@@ -279,19 +303,28 @@ impl S3Client {
         Ok(key)
     }
 
-    /// Upload several local files (or whole directory trees) into `prefix`.
-    /// Returns a per-file report so partial failures don't abort the batch.
+    /// Upload several local files (or whole directory trees) into `prefix` with
+    /// a shared `storage_class`. Returns a per-file report so partial failures
+    /// don't abort the batch.
     pub async fn upload_files(
         &self,
         bucket: &str,
         prefix: &str,
         files: &[(std::path::PathBuf, Vec<(String, String)>)],
+        storage_class: &StorageClass,
     ) -> UploadReport {
         let mut report = UploadReport::default();
         for (path, key_suffix, metadata) in expand_upload_sources(files) {
             let path_str = path.to_string_lossy();
             match self
-                .upload_file(bucket, prefix, &key_suffix, &path_str, &metadata)
+                .upload_file(
+                    bucket,
+                    prefix,
+                    &key_suffix,
+                    &path_str,
+                    &metadata,
+                    storage_class,
+                )
                 .await
             {
                 Ok(key) => report.uploaded.push(format!("{bucket}/{key}")),

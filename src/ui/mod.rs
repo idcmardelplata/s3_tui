@@ -65,6 +65,7 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     match state.input_mode {
         InputMode::FilePicker => render_file_picker(frame, state, &theme),
         InputMode::Metadata => render_metadata_editor(frame, state, &theme),
+        InputMode::StorageClass => render_storage_class_picker(frame, state, &theme),
         InputMode::None => {}
         _ => render_input_popup(frame, state, &theme),
     }
@@ -586,7 +587,7 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
 
@@ -712,17 +713,22 @@ fn render_file_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         chunks[1],
     );
 
-    let hints = format!(
-        " {} | ↑↓:mover · Enter/→:abrir dir · Espacio:marcar/desmarcar · a:todo · c:limpiar · u:metadatos · Esc:atrás ",
-        state.file_picker.dir.display()
+    let help = upload_help_line(
+        theme,
+        &[
+            ("\u{2191}\u{2193}", "mover"),
+            ("Enter/\u{2192}", "abrir dir"),
+            ("Espacio", "marcar"),
+            ("a", "todo"),
+            ("c", "limpiar"),
+            ("u", "agregar metadatos"),
+            ("Esc", "atrás"),
+        ],
     );
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            hints,
-            Style::default().fg(theme.text_dim),
-        )))
-        .block(Block::default().borders(Borders::NONE))
-        .wrap(Wrap { trim: false }),
+        Paragraph::new(help)
+            .block(Block::default().borders(Borders::NONE))
+            .wrap(Wrap { trim: false }),
         chunks[2],
     );
 }
@@ -755,7 +761,7 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
 
@@ -917,19 +923,120 @@ fn render_metadata_editor(frame: &mut Frame, state: &mut AppState, theme: &Theme
         chunks[1],
     );
 
+    let storage_class = state.metadata_editor.storage_class.to_string();
+    let class_description = format!("clase ({storage_class})");
+    let help = upload_help_line(
+        theme,
+        &[
+            ("\u{2191}\u{2193}", "fila"),
+            ("Tab", "clave/valor"),
+            ("Enter", "aceptar"),
+            ("A", "fila"),
+            ("D", "borrar"),
+            ("N/P", "archivo"),
+            ("C", class_description.as_str()),
+            ("U", "subir"),
+            ("Esc", "atrás"),
+        ],
+    );
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " ↑↓:fila · Tab:clave↔valor · Enter:aceptar · A:agregar fila · D:borrar fila · N/P:elemento · U:subir ahora · Esc:atrás ",
-            Style::default().fg(theme.text_dim),
-        )))
-        .block(Block::default().borders(Borders::NONE)),
+        Paragraph::new(help)
+            .block(Block::default().borders(Borders::NONE))
+            .wrap(Wrap { trim: false }),
         chunks[2],
     );
+}
+
+/// One-line action documentation: each entry is a ` key:descripción ` span.
+fn upload_help_line<'a>(theme: &Theme, help: &[(&'a str, &'a str)]) -> Line<'a> {
+    let spans: Vec<Span> = help
+        .iter()
+        .map(|(k, v)| Span::styled(format!(" {k}:{v} "), Style::default().fg(theme.text_dim)))
+        .collect();
+    Line::from(spans)
 }
 
 /// True while the picker failed to read its directory (hint is set).
 fn picker_is_loading_error(state: &AppState) -> bool {
     !state.file_picker.hint.is_empty()
+}
+
+/// Popup to pick the storage class a batch upload writes objects with.
+fn render_storage_class_picker(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
+    let options = StorageClass::uploadable();
+    let popup = centered_rect(52, options.len() as u16 + 4, frame.area());
+    frame.render_widget(Clear, popup);
+
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, sc)| {
+            let is_cursor = i == state.metadata_editor.storage_class_index;
+            let is_current = state.metadata_editor.storage_class == *sc;
+            let cursor_span = if is_cursor {
+                Span::styled(
+                    "\u{25b8}",
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(" ", Style::default().fg(theme.text_dim))
+            };
+            let check_span = if is_current {
+                Span::styled(
+                    format!("[{}]", "\u{2713}"),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("[ ]", Style::default().fg(theme.text_dim))
+            };
+            let label_span = if is_cursor {
+                Span::styled(
+                    format!(" {sc}"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    format!(" {sc}"),
+                    Style::default().fg(if is_current {
+                        theme.success
+                    } else {
+                        theme.text
+                    }),
+                )
+            };
+            ListItem::new(Line::from(vec![cursor_span, check_span, label_span]))
+        })
+        .collect();
+
+    let block = Block::default()
+        .title(Line::from(Span::styled(
+            centered_title(format!(
+                " Clase de almacenamiento — {}/{} ",
+                state.metadata_editor.selected + 1,
+                state.metadata_editor.len()
+            )),
+            panel_title(theme),
+        )))
+        .title_bottom(Line::from(Span::styled(
+            " ↑↓:elegir · Enter:confirmar · Esc:cancelar ",
+            Style::default().fg(theme.text_dim),
+        )))
+        .borders(Borders::ALL)
+        .border_style(panel_border(theme, true))
+        .padding(Padding::horizontal(1));
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(selected_row(theme));
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.metadata_editor.storage_class_index));
+    frame.render_stateful_widget(list, popup, &mut list_state);
 }
 
 fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
@@ -944,6 +1051,7 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         InputMode::Filter => (" Filtrar objetos (escribí para buscar) ", theme.accent),
         InputMode::FilePicker => (" Seleccionar archivos para subir ", theme.info),
         InputMode::Metadata => (" Metadatos de subida ", theme.info),
+        InputMode::StorageClass => (" Clase de almacenamiento ", theme.info),
         InputMode::None => (" Entrada ", theme.text_dim),
     };
 
@@ -964,6 +1072,7 @@ fn render_input_popup(frame: &mut Frame, state: &mut AppState, theme: &Theme) {
         InputMode::Filter => "Escribí para filtrar objetos. Enter aplica, Esc limpia.",
         InputMode::FilePicker => "Seleccioná archivos o carpetas. u abre el editor de metadatos.",
         InputMode::Metadata => "Editá la tabla de metadatos y presioná U (mayúscula) para subir.",
+        InputMode::StorageClass => "Elegí la clase de almacenamiento de los objetos.",
         InputMode::None => "",
     };
     frame.render_widget(
@@ -1243,5 +1352,113 @@ mod tests {
         assert!(locate(&buffer, "Metadatos:").is_some(), "metadata header");
         assert!(locate(&buffer, "env: prod").is_some(), "metadata entry");
         assert!(locate(&buffer, "team: infra").is_some(), "metadata entry");
+    }
+
+    #[test]
+    fn renders_storage_class_picker_marks_current_class() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::StorageClass;
+        state.metadata_editor =
+            crate::app::MetadataEditor::from_paths(vec![std::path::PathBuf::from("/tmp/a.txt")]);
+        state.metadata_editor.storage_class = StorageClass::Glacier;
+        state.metadata_editor.storage_class_index = 4;
+        let buffer = draw(&mut state, 60, 16);
+        assert!(
+            locate(&buffer, "Clase de almacenamiento").is_some(),
+            "picker title shown"
+        );
+        assert!(locate(&buffer, "STANDARD").is_some(), "STANDARD listed");
+        assert!(locate(&buffer, "GLACIER").is_some(), "GLACIER listed");
+        assert!(
+            locate(&buffer, "DEEP_ARCHIVE").is_some(),
+            "DEEP_ARCHIVE listed"
+        );
+
+        let checked_row = (0..buffer.area.height).find_map(|y| {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect();
+            row.contains('\u{2713}').then_some(row)
+        });
+        let checked_row = checked_row.expect("a check mark marks the current class");
+        assert!(
+            checked_row.contains("GLACIER"),
+            "check mark sits on the current class row: {checked_row}"
+        );
+    }
+
+    #[test]
+    fn metadata_editor_documents_actions_without_overlap() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::Metadata;
+        state.metadata_editor =
+            crate::app::MetadataEditor::from_paths(vec![std::path::PathBuf::from("/tmp/a.txt")]);
+        state.metadata_editor.storage_class = StorageClass::Glacier;
+        state.metadata_editor.files[0]
+            .1
+            .push(("env".to_string(), "prod".to_string()));
+
+        for width in [120u16, 80u16] {
+            let buffer = draw(&mut state, width, 18);
+            for needle in [
+                "\u{2191}\u{2193}:fila",
+                "A:fila",
+                "D:borrar",
+                "Tab:clave/valor",
+                "C:clase",
+                "U:subir",
+                "Esc:atrás",
+            ] {
+                assert!(
+                    locate(&buffer, needle).is_some(),
+                    "metadata docs '{needle}' fully visible at {width} cols"
+                );
+            }
+            assert!(
+                locate(&buffer, "GLACIER").is_some(),
+                "current storage class shown at {width} cols"
+            );
+        }
+        let buffer = draw(&mut state, 80, 18);
+        assert!(
+            locate(&buffer, "atrás").is_some(),
+            "doc wraps into the reserved second row, tail not clipped"
+        );
+        assert!(
+            locate(&buffer, "U:subir").is_some(),
+            "last actions still visible after the wrap"
+        );
+    }
+
+    #[test]
+    fn file_picker_documents_actions_without_overlap() {
+        let mut state = sample_state();
+        state.input_mode = InputMode::FilePicker;
+        for width in [120u16, 80u16] {
+            let buffer = draw(&mut state, width, 18);
+            for needle in [
+                "\u{2191}\u{2193}:mover",
+                "Enter/\u{2192}:abrir",
+                "Espacio:marcar",
+                "a:todo",
+                "c:limpiar",
+                "u:agregar",
+                "Esc:atrás",
+            ] {
+                assert!(
+                    locate(&buffer, needle).is_some(),
+                    "picker docs '{needle}' fully visible at {width} cols"
+                );
+            }
+            assert!(
+                locate(&buffer, "metadatos").is_some(),
+                "the u:agregar metadatos action is documented at {width} cols"
+            );
+        }
+        let buffer = draw(&mut state, 80, 18);
+        assert!(
+            locate(&buffer, "atrás").is_some(),
+            "picker doc tail not clipped after the wrap"
+        );
     }
 }
