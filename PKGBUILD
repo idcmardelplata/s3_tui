@@ -1,7 +1,7 @@
 # Maintainer: Martin Algañaraz <idcmardelplata@protonmail.com>
 
 pkgname=s3_tui
-pkgver=0.5.2
+pkgver=0.6.4
 pkgrel=1
 pkgdesc="A terminal UI manager for AWS S3"
 arch=('x86_64' 'aarch64')
